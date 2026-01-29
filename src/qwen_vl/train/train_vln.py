@@ -59,6 +59,7 @@ class WeightedLossTrainer(transformers.Trainer):
         )
         active = shift_labels.view(-1) != IGNORE_INDEX
 
+        weight_flat = None
         if loss_weights is not None:
             shift_weights = loss_weights[..., 1:].contiguous().to(loss_flat.device)
             weight_flat = shift_weights.view(-1)
@@ -79,7 +80,7 @@ class WeightedLossTrainer(transformers.Trainer):
             for seg_idx, name in enumerate(names, start=1):
                 seg_mask = active & (shift_seg == seg_idx)
                 if seg_mask.any():
-                    if loss_weights is not None:
+                    if loss_weights is not None and weight_flat is not None:
                         seg_denom = weight_flat[seg_mask].sum().clamp_min(1.0)
                         seg_loss = (loss_flat[seg_mask] * weight_flat[seg_mask]).sum() / seg_denom
                     else:
@@ -100,42 +101,55 @@ class WeightedLossTrainer(transformers.Trainer):
                     self._seq_len_window = seq_window
                 seq_window.extend(seq_lens.detach().cpu().tolist())
                 if len(seq_window) >= 10:
-                    seq_tensor = torch.tensor(list(seq_window))
+                    seq_tensor = torch.tensor(list(seq_window), dtype=torch.float32)
                     seg_metrics["seq_len_p95"] = int(torch.quantile(seq_tensor, 0.95).item())
                     seg_metrics["seq_len_p99"] = int(torch.quantile(seq_tensor, 0.99).item())
 
-            pixel_values = inputs.get("pixel_values")
-            if pixel_values is not None:
-                batch_size = inputs.get("input_ids").shape[0]
-                num_images = pixel_values.shape[0]
-                images_per_sample = num_images / max(batch_size, 1)
-                seg_metrics["images_per_sample"] = images_per_sample
+            batch_size = inputs.get("input_ids").shape[0]
 
-                img_window = getattr(self, "_img_per_sample_window", None)
+            # 说明：VLN collator 会把 batch 内所有图片展平成一个列表；
+            # `pixel_values.shape[0]` 在你的实现中经常是“视觉 patch/token 数”的口径，不是图片张数。
+            image_grid_thw = inputs.get("image_grid_thw")
+            if image_grid_thw is not None:
+                num_images_total = int(image_grid_thw.shape[0])
+                num_images_per_sample = num_images_total / max(batch_size, 1)
+                seg_metrics["num_images_per_sample"] = num_images_per_sample
+
+                img_window = getattr(self, "_num_images_window", None)
                 if img_window is None:
                     img_window = deque(maxlen=200)
-                    self._img_per_sample_window = img_window
-                img_window.append(float(images_per_sample))
+                    self._num_images_window = img_window
+                img_window.append(float(num_images_per_sample))
                 if len(img_window) >= 10:
-                    img_tensor = torch.tensor(list(img_window))
-                    seg_metrics["images_per_sample_p95"] = float(torch.quantile(img_tensor, 0.95).item())
+                    img_tensor = torch.tensor(list(img_window), dtype=torch.float32)
+                    seg_metrics["num_images_per_sample_p95"] = float(torch.quantile(img_tensor, 0.95).item())
 
-                image_grid_thw = inputs.get("image_grid_thw")
-                if image_grid_thw is not None:
-                    visual_tokens = image_grid_thw.prod(dim=1).sum().item()
-                    visual_tokens_per_sample = visual_tokens / max(batch_size, 1)
-                    seg_metrics["visual_tokens_per_sample"] = visual_tokens_per_sample
+                visual_tokens_premerge_total = float(image_grid_thw.prod(dim=1).sum().item())
+                visual_tokens_premerge_per_sample = visual_tokens_premerge_total / max(batch_size, 1)
+                seg_metrics["visual_tokens_per_sample_premerge"] = visual_tokens_premerge_per_sample
 
-                    vis_window = getattr(self, "_visual_tokens_window", None)
-                    if vis_window is None:
-                        vis_window = deque(maxlen=200)
-                        self._visual_tokens_window = vis_window
-                    vis_window.append(float(visual_tokens_per_sample))
-                    if len(vis_window) >= 10:
-                        vis_tensor = torch.tensor(list(vis_window))
-                        seg_metrics["visual_tokens_per_sample_p95"] = float(
-                            torch.quantile(vis_tensor, 0.95).item()
-                        )
+                vc = getattr(getattr(self.model, "config", None), "vision_config", None)
+                merge_size = getattr(vc, "spatial_merge_size", 2) if vc is not None else 2
+                try:
+                    merge_size = int(merge_size)
+                except Exception:
+                    merge_size = 2
+                visual_tokens_postmerge_per_sample = visual_tokens_premerge_per_sample / max(merge_size * merge_size, 1)
+                seg_metrics["visual_tokens_per_sample_postmerge_est"] = visual_tokens_postmerge_per_sample
+
+                vis_window = getattr(self, "_visual_tokens_window", None)
+                if vis_window is None:
+                    vis_window = deque(maxlen=200)
+                    self._visual_tokens_window = vis_window
+                vis_window.append(float(visual_tokens_premerge_per_sample))
+                if len(vis_window) >= 10:
+                    vis_tensor = torch.tensor(list(vis_window), dtype=torch.float32)
+                    seg_metrics["visual_tokens_per_sample_premerge_p95"] = float(torch.quantile(vis_tensor, 0.95).item())
+
+            pixel_values = inputs.get("pixel_values")
+            if pixel_values is not None:
+                # 仅用于诊断：表示视觉侧张量第一维的“行数”（通常是 patch/token 行），避免误当图片张数
+                seg_metrics["pixel_values_rows_per_sample"] = float(pixel_values.shape[0]) / max(batch_size, 1)
 
             step = int(self.state.global_step)
             last_step = getattr(self, "_last_segment_log_step", -1)
@@ -148,6 +162,7 @@ class WeightedLossTrainer(transformers.Trainer):
 
 class StepTimeLoggerCallback(transformers.TrainerCallback):
     def __init__(self):
+        super().__init__()
         self._step_start = None
 
     def on_step_begin(self, args, state, control, **kwargs):
@@ -166,7 +181,10 @@ class StepTimeLoggerCallback(transformers.TrainerCallback):
             logs["gpu_max_mem_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
             logs["gpu_mem_reserved_gb"] = torch.cuda.memory_reserved() / (1024**3)
         if args.per_device_train_batch_size:
-            world_size = state.world_size if state.world_size else 1
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                world_size = torch.distributed.get_world_size()
+            else:
+                world_size = 1
             logs["samples_per_second_est"] = (
                 args.per_device_train_batch_size * world_size
             ) / max(step_time, 1e-6)
@@ -177,8 +195,51 @@ class StepTimeLoggerCallback(transformers.TrainerCallback):
                 trainer.log(logs)
 
 
+class SyncEmptyCacheCallback(transformers.TrainerCallback):
+    """Optional: synchronize `empty_cache()` across ranks to reduce allocator cache flush jitter.
+
+    Default is disabled (empty_cache_steps=0). Keep frequency low (e.g., 50-200) to avoid extra sync overhead.
+    """
+
+    def on_step_end(self, args, state, control, **kwargs):
+        steps = int(getattr(args, "empty_cache_steps", 0) or 0)
+        if steps <= 0:
+            return
+        if state.global_step <= 0 or (state.global_step % steps) != 0:
+            return
+
+        if not torch.cuda.is_available():
+            return
+
+        threshold_gb = float(getattr(args, "empty_cache_reserved_gb_threshold", 0.0) or 0.0)
+        if threshold_gb > 0.0:
+            reserved_gb = torch.cuda.memory_reserved() / (1024**3)
+            if reserved_gb < threshold_gb:
+                return
+
+        dist_on = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if dist_on:
+            torch.distributed.barrier()
+
+        try:
+            from deepspeed.accelerator import get_accelerator
+
+            get_accelerator().empty_cache()
+        except Exception:
+            torch.cuda.empty_cache()
+
+        if dist_on:
+            torch.distributed.barrier()
+
+        if state.is_world_process_zero:
+            trainer = kwargs.get("trainer")
+            if trainer is not None:
+                trainer.log({"synced_empty_cache": 1, "empty_cache_reserved_gb": torch.cuda.memory_reserved() / (1024**3)})
+
+
 class ActionWeightSchedulerCallback(transformers.TrainerCallback):
     def __init__(self, data_args, training_args):
+        super().__init__()
         self.data_args = data_args
         self.training_args = training_args
         self._weights = None
@@ -369,12 +430,34 @@ def train(attn_implementation="flash_attention_2"):
         model=model, tokenizer=tokenizer, args=training_args, **data_module
     )
     trainer.add_callback(StepTimeLoggerCallback())
+    if int(getattr(training_args, "empty_cache_steps", 0) or 0) > 0:
+        trainer.add_callback(SyncEmptyCacheCallback())
     trainer.add_callback(ActionWeightSchedulerCallback(data_args, training_args))
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        logging.info("checkpoint found, resume training")
-        trainer.train(resume_from_checkpoint=True)
+    checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    save_only_model = bool(getattr(training_args, "save_only_model", False))
+
+    def _ckpt_step(p: pathlib.Path) -> int:
+        m = re.search(r"checkpoint-(\d+)$", p.name)
+        return int(m.group(1)) if m else -1
+
+    last_ckpt = max(checkpoints, key=_ckpt_step) if checkpoints else None
+    has_deepspeed_state = False
+    if last_ckpt is not None:
+        has_deepspeed_state = bool(list(last_ckpt.glob("global_step*"))) or bool(
+            list(last_ckpt.glob("**/zero_pp_rank_*_model_states.pt"))
+        )
+
+    # If we only save model weights, DeepSpeed checkpoint state is typically absent; do not auto-resume.
+    if save_only_model and last_ckpt is not None:
+        logging.warning("checkpoint found but save_only_model=True; skipping resume")
+        trainer.train()
+    elif last_ckpt is not None and (not trainer.deepspeed or has_deepspeed_state):
+        logging.info(f"checkpoint found, resume training from {last_ckpt}")
+        trainer.train(resume_from_checkpoint=str(last_ckpt))
     else:
+        if last_ckpt is not None and trainer.deepspeed and not has_deepspeed_state:
+            logging.warning("checkpoint found but no DeepSpeed state; skipping resume")
         trainer.train()
     trainer.save_state()
     data_args.image_processor.save_pretrained(training_args.output_dir)

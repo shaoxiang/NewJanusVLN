@@ -96,3 +96,11 @@ class TrainingArguments(transformers.TrainingArguments):
         default=None,
         metadata={"help": "Comma-separated step ratios for schedule, e.g. 0.3,0.6"},
     )
+    empty_cache_steps: int = field(
+        default=0,
+        metadata={"help": "If >0, run a synchronized empty_cache() every N steps (all ranks). 0 disables."},
+    )
+    empty_cache_reserved_gb_threshold: float = field(
+        default=0.0,
+        metadata={"help": "Only empty_cache when torch.cuda.memory_reserved() exceeds this GB threshold. 0 disables."},
+    )

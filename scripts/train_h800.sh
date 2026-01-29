@@ -7,6 +7,12 @@ export PYTHONPATH="$PWD/src:$PYTHONPATH"
 export OMP_NUM_THREADS=1
 export NCCL_NVLS_ENABLE=1  # 已确认有 NVLINK，优先开启；若遇到 NCCL 问题再改回 0
 
+# 减少 CUDA allocator 碎片化与频繁 cache flush（稳健优先）
+# - expandable_segments: 让大块显存段可扩展，降低碎片
+# - max_split_size_mb: 限制大块切分，避免碎片化
+# - garbage_collection_threshold: 提前触发回收，降低高压时的 cache flush 概率
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.8"
+
 # 自动获取端口，防止冲突
 MASTER_ADDR="127.0.0.1"
 MASTER_PORT=$(shuf -i 20000-29999 -n 1)
@@ -28,7 +34,7 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p "$CACHE_DIR"
 
 # DeepSpeed 配置文件路径 (需确保该文件存在，见下文)
-DS_CONFIG="scripts/zero2.json"
+DS_CONFIG="scripts/zero3.json"
 
 # =========================================================
 # 3. 训练启动 (Training Command)
@@ -54,13 +60,13 @@ torchrun \
     --tune_mm_mlp True \
     --bf16 True \
     --bf16_full_eval True \
-    --per_device_train_batch_size 8 \
+    --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 1 \
-    --learning_rate 2e-5 \
+    --gradient_accumulation_steps 8 \
+    --learning_rate 6e-5 \
     --mm_projector_lr 1e-5 \
     --vision_tower_lr 1e-6 \
-    --model_max_length 163840 \
+    --model_max_length 131072 \
     --num_train_epochs 3 \
     --max_history_images 8 \
     --action_weight 1.0 \
