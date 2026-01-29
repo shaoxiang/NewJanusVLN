@@ -4,6 +4,8 @@ import os
 import pathlib
 import shutil
 import sys
+import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -86,6 +88,55 @@ class WeightedLossTrainer(transformers.Trainer):
                 else:
                     seg_metrics[f"loss_{name}"] = 0.0
 
+            attention_mask = inputs.get("attention_mask")
+            if attention_mask is not None:
+                seq_lens = attention_mask.sum(dim=1)
+                seg_metrics["seq_len_max"] = int(seq_lens.max().item())
+                seg_metrics["seq_len_mean"] = float(seq_lens.float().mean().item())
+
+                seq_window = getattr(self, "_seq_len_window", None)
+                if seq_window is None:
+                    seq_window = deque(maxlen=200)
+                    self._seq_len_window = seq_window
+                seq_window.extend(seq_lens.detach().cpu().tolist())
+                if len(seq_window) >= 10:
+                    seq_tensor = torch.tensor(list(seq_window))
+                    seg_metrics["seq_len_p95"] = int(torch.quantile(seq_tensor, 0.95).item())
+                    seg_metrics["seq_len_p99"] = int(torch.quantile(seq_tensor, 0.99).item())
+
+            pixel_values = inputs.get("pixel_values")
+            if pixel_values is not None:
+                batch_size = inputs.get("input_ids").shape[0]
+                num_images = pixel_values.shape[0]
+                images_per_sample = num_images / max(batch_size, 1)
+                seg_metrics["images_per_sample"] = images_per_sample
+
+                img_window = getattr(self, "_img_per_sample_window", None)
+                if img_window is None:
+                    img_window = deque(maxlen=200)
+                    self._img_per_sample_window = img_window
+                img_window.append(float(images_per_sample))
+                if len(img_window) >= 10:
+                    img_tensor = torch.tensor(list(img_window))
+                    seg_metrics["images_per_sample_p95"] = float(torch.quantile(img_tensor, 0.95).item())
+
+                image_grid_thw = inputs.get("image_grid_thw")
+                if image_grid_thw is not None:
+                    visual_tokens = image_grid_thw.prod(dim=1).sum().item()
+                    visual_tokens_per_sample = visual_tokens / max(batch_size, 1)
+                    seg_metrics["visual_tokens_per_sample"] = visual_tokens_per_sample
+
+                    vis_window = getattr(self, "_visual_tokens_window", None)
+                    if vis_window is None:
+                        vis_window = deque(maxlen=200)
+                        self._visual_tokens_window = vis_window
+                    vis_window.append(float(visual_tokens_per_sample))
+                    if len(vis_window) >= 10:
+                        vis_tensor = torch.tensor(list(vis_window))
+                        seg_metrics["visual_tokens_per_sample_p95"] = float(
+                            torch.quantile(vis_tensor, 0.95).item()
+                        )
+
             step = int(self.state.global_step)
             last_step = getattr(self, "_last_segment_log_step", -1)
             if step > 0 and step != last_step and step % self.args.logging_steps == 0:
@@ -93,6 +144,83 @@ class WeightedLossTrainer(transformers.Trainer):
                 self.log(seg_metrics)
 
         return (loss, outputs) if return_outputs else loss
+
+
+class StepTimeLoggerCallback(transformers.TrainerCallback):
+    def __init__(self):
+        self._step_start = None
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        self._step_start = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero or self._step_start is None:
+            return
+        step_time = time.time() - self._step_start
+        logs = {"step_time": step_time}
+        if torch.cuda.is_available():
+            logs["gpu_max_mem_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
+            logs["gpu_mem_reserved_gb"] = torch.cuda.memory_reserved() / (1024**3)
+        if args.per_device_train_batch_size:
+            world_size = state.world_size if state.world_size else 1
+            logs["samples_per_second_est"] = (
+                args.per_device_train_batch_size * world_size
+            ) / max(step_time, 1e-6)
+
+        if args.logging_steps > 0 and state.global_step % args.logging_steps == 0:
+            trainer = kwargs.get("trainer")
+            if trainer is not None:
+                trainer.log(logs)
+
+
+class ActionWeightSchedulerCallback(transformers.TrainerCallback):
+    def __init__(self, data_args, training_args):
+        self.data_args = data_args
+        self.training_args = training_args
+        self._weights = None
+        self._milestones = None
+        self._current = None
+        self._parse_schedule()
+
+    def _parse_schedule(self):
+        if not self.training_args.action_weight_schedule or not self.training_args.action_weight_milestones:
+            return
+        try:
+            weights = [float(x) for x in self.training_args.action_weight_schedule.split(",")]
+            milestones = [float(x) for x in self.training_args.action_weight_milestones.split(",")]
+            if len(weights) != 3 or len(milestones) != 2:
+                return
+            self._weights = weights
+            self._milestones = milestones
+        except Exception:
+            self._weights = None
+            self._milestones = None
+
+    def _get_weight(self, progress: float):
+        if self._weights is None or self._milestones is None:
+            return None
+        if progress <= self._milestones[0]:
+            return self._weights[0]
+        if progress <= self._milestones[1]:
+            return self._weights[1]
+        return self._weights[2]
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero or state.max_steps <= 0:
+            return
+        target = self._get_weight(state.global_step / state.max_steps)
+        if target is None:
+            return
+        if self._current is None or abs(self._current - target) > 1e-6:
+            self._current = target
+            self.data_args.action_weight = target
+            trainer = kwargs.get("trainer")
+            if trainer is not None:
+                trainer.log({"action_weight": target})
 
 
 # Sample prediction logging disabled per request.
@@ -232,9 +360,16 @@ def train(attn_implementation="flash_attention_2"):
         model.model.print_trainable_parameters()
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+    if data_module.get("train_dataset") is not None:
+        rank0_print(f"train_dataset_size={len(data_module['train_dataset'])}")
+    if data_module.get("eval_dataset") is not None:
+        rank0_print(f"eval_dataset_size={len(data_module['eval_dataset'])}")
+
     trainer = WeightedLossTrainer(
         model=model, tokenizer=tokenizer, args=training_args, **data_module
     )
+    trainer.add_callback(StepTimeLoggerCallback())
+    trainer.add_callback(ActionWeightSchedulerCallback(data_args, training_args))
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         logging.info("checkpoint found, resume training")

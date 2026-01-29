@@ -5,7 +5,7 @@
 # =========================================================
 export PYTHONPATH="$PWD/src:$PYTHONPATH"
 export OMP_NUM_THREADS=1
-export NCCL_NVLS_ENABLE=0  # 如果遇到NCCL问题可尝试改为0，H800集群通常支持NVLink
+export NCCL_NVLS_ENABLE=1  # 已确认有 NVLINK，优先开启；若遇到 NCCL 问题再改回 0
 
 # 自动获取端口，防止冲突
 MASTER_ADDR="127.0.0.1"
@@ -28,7 +28,7 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p "$CACHE_DIR"
 
 # DeepSpeed 配置文件路径 (需确保该文件存在，见下文)
-DS_CONFIG="scripts/zero3.json"
+DS_CONFIG="scripts/zero2.json"
 
 # =========================================================
 # 3. 训练启动 (Training Command)
@@ -54,26 +54,35 @@ torchrun \
     --tune_mm_mlp True \
     --bf16 True \
     --bf16_full_eval True \
-    --per_device_train_batch_size 1 \
+    --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps 1 \
     --learning_rate 2e-5 \
     --mm_projector_lr 1e-5 \
     --vision_tower_lr 1e-6 \
     --model_max_length 163840 \
     --num_train_epochs 3 \
     --max_history_images 8 \
+    --action_weight 1.0 \
+    --action_weight_schedule "1.0,2.0,3.0" \
+    --action_weight_milestones "0.3,0.6" \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 10 \
-    --save_steps 500 \
-    --save_total_limit 2 \
+    --logging_steps 5 \
+    --logging_first_step True \
+    --save_steps 2000 \
+    --save_safetensors True \
+    --save_only_model True \
+    --save_total_limit 1 \
     --evaluation_strategy no \
     --eval_steps 300000 \
     --eval_split_ratio 0.0 \
     --eval_num_samples 2 \
-    --dataloader_num_workers 8 \
-    --gradient_checkpointing True \
+    --dataloader_num_workers 16 \
+    --dataloader_pin_memory True \
+    --dataloader_persistent_workers True \
+    --ddp_find_unused_parameters False \
+    --gradient_checkpointing False \
     --report_to "tensorboard" \
     --group_by_modality_length True \
     --data_flatten False \

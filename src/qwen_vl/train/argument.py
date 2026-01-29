@@ -88,3 +88,11 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_projector_lr: Optional[float] = None
     vision_tower_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
+    action_weight_schedule: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated action weights for phased schedule, e.g. 1.0,2.0,3.0"},
+    )
+    action_weight_milestones: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated step ratios for schedule, e.g. 0.3,0.6"},
+    )

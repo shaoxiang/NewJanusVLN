@@ -25,6 +25,7 @@
 # limitations under the License.
 
 import math
+import time
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -2049,10 +2050,20 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
             self.vggt.eval()
             inputs_embeds = self.model.embed_tokens(input_ids)
             if pixel_values is not None:
+                do_timing = self.training and (
+                    not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+                )
+                vggt_start = None
+                if do_timing:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    vggt_start = time.perf_counter()
+
                 batch_size = inputs_embeds.shape[0]
                 raw_images = raw_images if raw_images is not None else [None] * batch_size
                 image_embeds_3d = []
                 teacher_outputs = []
+                frame_count = 0
                 for i in range(batch_size):
                     if images_vggt[i].shape[0] > 0:
                         # n_image = images_vggt[i].shape[0]
@@ -2083,6 +2094,7 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                                     self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
 
                                 for k, frame in enumerate(images_vggt[i]):
+                                    frame_count += 1
                                     images = frame.unsqueeze(0).unsqueeze(0) 
                                     aggregator_output = self.vggt.aggregator(
                                         images, 
@@ -2116,6 +2128,19 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                         image_embeds_3d.append(self.merger(features))
 
                 image_embeds_3d = torch.cat(image_embeds_3d, dim=0).to(self.visual.dtype)
+
+                if do_timing and vggt_start is not None:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    vggt_time = time.perf_counter() - vggt_start
+                    if not hasattr(self, "_vggt_timing_counter"):
+                        self._vggt_timing_counter = 0
+                    self._vggt_timing_counter += 1
+                    if self._vggt_timing_counter % 10 == 0:
+                        per_frame = vggt_time / max(frame_count, 1)
+                        logger.info(
+                            f"vggt_time_s={vggt_time:.3f}, frames={frame_count}, per_frame_s={per_frame:.4f}, batch={batch_size}"
+                        )
 
                 pixel_values = pixel_values.type(self.visual.dtype)
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
