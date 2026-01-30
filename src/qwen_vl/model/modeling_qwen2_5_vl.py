@@ -336,13 +336,42 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
-        attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+        # IMPORTANT: do NOT materialize a dense [L, L] attention mask here.
+        # For vision, `cu_seqlens` defines independent segments (images or windows). We apply attention per segment,
+        # which is equivalent to a block-diagonal mask but avoids catastrophic O(L^2) memory.
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+
+        attn_output = torch.empty_like(q)
+        cu = cu_seqlens
+        if torch.is_tensor(cu):
+            cu = cu.detach().to("cpu").tolist()
+        if len(cu) < 2:
+            cu = [0, seq_length]
+
+        if q.is_cuda:
+            # Prefer flash/mem-efficient; avoid math attention which can OOM on long sequences.
+            try:
+                with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_mem_efficient=True, enable_math=False):
+                    for s, e in zip(cu[:-1], cu[1:]):
+                        if e > s:
+                            attn_output[:, s:e, :] = F.scaled_dot_product_attention(
+                                q[:, s:e, :], k[:, s:e, :], v[:, s:e, :], attn_mask=None, dropout_p=0.0
+                            )
+            except Exception:
+                for s, e in zip(cu[:-1], cu[1:]):
+                    if e > s:
+                        attn_output[:, s:e, :] = F.scaled_dot_product_attention(
+                            q[:, s:e, :], k[:, s:e, :], v[:, s:e, :], attn_mask=None, dropout_p=0.0
+                        )
+        else:
+            for s, e in zip(cu[:-1], cu[1:]):
+                if e > s:
+                    attn_output[:, s:e, :] = F.scaled_dot_product_attention(
+                        q[:, s:e, :], k[:, s:e, :], v[:, s:e, :], attn_mask=None, dropout_p=0.0
+                    )
+
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)

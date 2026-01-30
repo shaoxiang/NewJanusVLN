@@ -378,6 +378,9 @@ def train(attn_implementation="flash_attention_2"):
         config = AutoConfig.from_pretrained(model_args.model_name_or_path)
         setattr(config, "lam", model_args.lam)
         setattr(config, "reference_frame", model_args.reference_frame)
+        # Ensure vision tower uses the same attention backend. Otherwise it may default to SDPA and OOM by building [L,L] masks.
+        if hasattr(config, "vision_config") and hasattr(config.vision_config, "_attn_implementation"):
+            config.vision_config._attn_implementation = attn_implementation
         # vision feature caching (training paradigm improvement when vision towers are frozen)
         setattr(config, "vision_feature_cache", bool(getattr(training_args, "vision_feature_cache", False)))
         setattr(config, "vision_feature_cache_write", bool(getattr(training_args, "vision_feature_cache_write", True)))
