@@ -345,6 +345,15 @@ def train(attn_implementation="flash_attention_2"):
     os.makedirs(training_args.output_dir, exist_ok=True)
     training_args.remove_unused_columns = False
 
+    # Avoid accidental Weights & Biases interactive prompt (can hang jobs).
+    # HF default is report_to="all" which includes wandb when installed.
+    if "--report_to" not in sys.argv:
+        training_args.report_to = ["tensorboard"]
+    rpt = getattr(training_args, "report_to", None)
+    rpt_list = [rpt] if isinstance(rpt, str) else (list(rpt) if rpt is not None else [])
+    if "wandb" in rpt_list and not sys.stdin.isatty():
+        os.environ.setdefault("WANDB_MODE", "disabled")
+
     if attn_implementation.startswith("flash") and not (training_args.bf16 or training_args.fp16):
         logging.warning("Flash attention requires bf16/fp16. Falling back to sdpa.")
         attn_implementation = "sdpa"
@@ -428,6 +437,16 @@ def train(attn_implementation="flash_attention_2"):
         padding_side="right",
         use_fast=False,
     )
+    # Some tokenizers keep a small default (e.g., 512) and will spam warnings / truncate.
+    tokenizer.model_max_length = int(training_args.model_max_length)
+    if hasattr(tokenizer, "init_kwargs") and isinstance(tokenizer.init_kwargs, dict):
+        tokenizer.init_kwargs["model_max_length"] = int(training_args.model_max_length)
+
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        logging.info(
+            f"tokenizer.model_max_length={tokenizer.model_max_length}, training_args.model_max_length={training_args.model_max_length}, report_to={getattr(training_args, 'report_to', None)}"
+        )
+
     set_model(model_args, model)
 
     if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
