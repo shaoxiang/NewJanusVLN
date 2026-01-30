@@ -25,11 +25,14 @@
 # limitations under the License.
 
 import math
+import os
 import time
 import warnings
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from typing_extensions import override
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -1697,6 +1700,11 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
         self.config.reference_frame = getattr(config, "reference_frame", "first")
         self.lam = getattr(config, "lam", 0.2)
 
+        # Vision feature cache (only useful when vision tower is frozen)
+        self._vision_feature_cache_mem = OrderedDict()
+        # VGGT feature cache (per-sample history, only useful when VGGT is frozen)
+        self._vggt_feature_cache_mem = OrderedDict()
+
         self.kv_cache_vggt = StartRecentKVCache(
                 start_size=8,          
                 recent_size=48,     
@@ -2059,73 +2067,184 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                         torch.cuda.synchronize()
                     vggt_start = time.perf_counter()
 
+                # Pop meta used for caching; prevent passing unknown kwargs downstream.
+                image_paths = kwargs.pop("image_paths", None)
+                sample_id = kwargs.pop("sample_id", None)
+
                 batch_size = inputs_embeds.shape[0]
                 raw_images = raw_images if raw_images is not None else [None] * batch_size
+
+                # Optionally cache frozen VGGT outputs (per-sample history) to avoid repeated VGGT forward.
+                vggt_use_cache = (
+                    self.training
+                    and bool(getattr(self.config, "vggt_feature_cache", False))
+                    and image_paths is not None
+                )
+                vggt_write_cache = bool(getattr(self.config, "vggt_feature_cache_write", True))
+                vggt_cache_max_entries = int(getattr(self.config, "vggt_feature_cache_max_entries", 128) or 128)
+
+                def _get_vggt_cache_dir() -> Optional[str]:
+                    base = getattr(self.config, "vggt_feature_cache_dir", None) or getattr(self.config, "cache_dir", None)
+                    if base is None:
+                        return None
+                    return os.path.join(base, "vggt_features")
+
+                def _mk_vggt_key(paths: list, height: int, width: int) -> str:
+                    ref = str(getattr(self.config, "reference_frame", "first"))
+                    patch = int(getattr(self.config.vision_config, "patch_size", 14) or 14)
+                    merge = int(getattr(self.config.vision_config, "spatial_merge_size", 2) or 2)
+                    raw = "|".join([str(p) for p in paths])
+                    raw = f"{raw}|ref={ref}|h={height}|w={width}|patch={patch}|merge={merge}"
+                    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+                def _vggt_mem_get(k: str):
+                    if k in self._vggt_feature_cache_mem:
+                        v = self._vggt_feature_cache_mem.pop(k)
+                        self._vggt_feature_cache_mem[k] = v
+                        return v
+                    return None
+
+                def _vggt_mem_put(k: str, v_cpu: torch.Tensor):
+                    self._vggt_feature_cache_mem[k] = v_cpu
+                    while len(self._vggt_feature_cache_mem) > vggt_cache_max_entries:
+                        self._vggt_feature_cache_mem.popitem(last=False)
+
+                def _vggt_cache_path(cache_dir: str, k: str) -> str:
+                    # Shard by prefix to avoid millions of files in a single directory.
+                    return os.path.join(cache_dir, k[:2], k[2:4], f"{k}.pt")
+
+                def _vggt_cache_path_legacy(cache_dir: str, k: str) -> str:
+                    # Backward-compatible path (older versions stored flat).
+                    return os.path.join(cache_dir, f"{k}.pt")
+
+                def _vggt_disk_load(cache_dir: str, k: str) -> Optional[torch.Tensor]:
+                    p = _vggt_cache_path(cache_dir, k)
+                    if not os.path.exists(p):
+                        p = _vggt_cache_path_legacy(cache_dir, k)
+                        if not os.path.exists(p):
+                            return None
+                    try:
+                        obj = torch.load(p, map_location="cpu")
+                        if isinstance(obj, dict) and "embeds" in obj:
+                            return obj["embeds"]
+                        if torch.is_tensor(obj):
+                            return obj
+                    except Exception:
+                        return None
+                    return None
+
+                def _vggt_disk_save(cache_dir: str, k: str, embeds_cpu: torch.Tensor):
+                    try:
+                        final_p = _vggt_cache_path(cache_dir, k)
+                        os.makedirs(os.path.dirname(final_p), exist_ok=True)
+                        tmp_p = final_p + f".tmp.{os.getpid()}"
+                        torch.save({"embeds": embeds_cpu}, tmp_p)
+                        os.replace(tmp_p, final_p)
+                    except Exception:
+                        pass
+
+                if vggt_use_cache:
+                    # image_paths can be List[List[str]] (batch) or List[str] (single)
+                    if isinstance(image_paths, list) and len(image_paths) > 0 and isinstance(image_paths[0], str):
+                        image_paths = [image_paths]
+                    if not isinstance(image_paths, list) or len(image_paths) != batch_size:
+                        vggt_use_cache = False
+
                 image_embeds_3d = []
                 teacher_outputs = []
                 frame_count = 0
+                vggt_cache_hits = 0
+                vggt_cache_misses = 0
+
                 for i in range(batch_size):
-                    if images_vggt[i].shape[0] > 0:
-                        # n_image = images_vggt[i].shape[0]
-                        n_image = 1
-                        height, width = images_vggt[i].shape[-2:]
-                        patch_size = self.config.vision_config.patch_size
-                        merge_size = self.config.vision_config.spatial_merge_size
-                        h_grid, w_grid = height // patch_size, width // patch_size
-                        h_grid_after_merge, w_grid_after_merge = h_grid // merge_size, w_grid // merge_size
-                        new_height = h_grid_after_merge * (patch_size * merge_size)
-                        new_width = w_grid_after_merge * (patch_size * merge_size)
+                    if images_vggt[i].shape[0] <= 0:
+                        continue
 
-                        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-                        sam3_obj_tokens = None
-                        # Run SAM3 on the last raw image (if provided) to get optional object tokens.
-                        if self.use_sam3 and raw_images[i] is not None:
-                            sam3_obj_tokens = self._run_sam3(raw_images[i])
+                    # n_image = images_vggt[i].shape[0]
+                    n_image = 1
+                    height, width = images_vggt[i].shape[-2:]
+                    patch_size = self.config.vision_config.patch_size
+                    merge_size = self.config.vision_config.spatial_merge_size
+                    h_grid, w_grid = height // patch_size, width // patch_size
+                    h_grid_after_merge, w_grid_after_merge = h_grid // merge_size, w_grid // merge_size
 
-                        with torch.no_grad():
-                            with torch.cuda.amp.autocast(dtype=dtype):
-                                if not self.config.reference_frame=="first":
-                                    images_vggt[i] = torch.flip(images_vggt[i], dims=(0,))
-                                
-                                if self.mode == "evaluation": 
-                                    if self.past_key_values_vggt is None:
-                                        self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
-                                else:
+                    vggt_key = None
+                    if vggt_use_cache:
+                        paths_i = image_paths[i] or []
+                        vggt_key = _mk_vggt_key(paths_i, height, width)
+                        cached = _vggt_mem_get(vggt_key)
+                        cache_dir = _get_vggt_cache_dir()
+                        if cached is None and cache_dir is not None:
+                            cached = _vggt_disk_load(cache_dir, vggt_key)
+                            if cached is not None:
+                                _vggt_mem_put(vggt_key, cached)
+                        if cached is not None:
+                            vggt_cache_hits += 1
+                            image_embeds_3d.append(cached.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
+                            continue
+                        vggt_cache_misses += 1
+
+                    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+                    sam3_obj_tokens = None
+                    # Run SAM3 on the last raw image (if provided) to get optional object tokens.
+                    if self.use_sam3 and raw_images[i] is not None:
+                        sam3_obj_tokens = self._run_sam3(raw_images[i])
+
+                    with torch.no_grad():
+                        with torch.cuda.amp.autocast(dtype=dtype):
+                            if not self.config.reference_frame == "first":
+                                images_vggt[i] = torch.flip(images_vggt[i], dims=(0,))
+
+                            if self.mode == "evaluation":
+                                if self.past_key_values_vggt is None:
                                     self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
+                            else:
+                                self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
 
-                                for k, frame in enumerate(images_vggt[i]):
-                                    frame_count += 1
-                                    images = frame.unsqueeze(0).unsqueeze(0) 
-                                    aggregator_output = self.vggt.aggregator(
-                                        images, 
-                                        past_key_values=self.past_key_values_vggt,
-                                        use_cache=True, 
-                                        past_frame_idx=k
-                                    )
-                                    
-                                    if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
-                                        aggregated_tokens, patch_start_idx, past_key_values_vggt = aggregator_output
-                                    else:
-                                        aggregated_tokens, patch_start_idx = aggregator_output
+                            for k, frame in enumerate(images_vggt[i]):
+                                frame_count += 1
+                                images = frame.unsqueeze(0).unsqueeze(0)
+                                aggregator_output = self.vggt.aggregator(
+                                    images,
+                                    past_key_values=self.past_key_values_vggt,
+                                    use_cache=True,
+                                    past_frame_idx=k,
+                                )
 
-                                    self.past_key_values_vggt = past_key_values_vggt
-                                    if self.mode == "evaluation" and self.past_key_values_vggt is not None:
-                                        self.past_key_values_vggt = self.kv_cache_vggt(self.past_key_values_vggt)
+                                if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
+                                    aggregated_tokens, patch_start_idx, past_key_values_vggt = aggregator_output
+                                else:
+                                    aggregated_tokens, patch_start_idx = aggregator_output
+                                    past_key_values_vggt = self.past_key_values_vggt
 
-                                    features = aggregated_tokens[-2][0,:, patch_start_idx:]
-                        # Cache latest SAM3 tokens for external consumption (not fused to avoid shape mismatch)
-                        if sam3_obj_tokens is not None:
-                            self.last_sam3_obj_tokens = sam3_obj_tokens
+                                self.past_key_values_vggt = past_key_values_vggt
+                                if self.mode == "evaluation" and self.past_key_values_vggt is not None:
+                                    self.past_key_values_vggt = self.kv_cache_vggt(self.past_key_values_vggt)
 
-                        if not self.config.reference_frame=="first":
-                            features = torch.flip(features, dims=(0,))
+                                features = aggregated_tokens[-2][0, :, patch_start_idx:]
 
-                        # using QwenPatchMerger
-                        features = features.view(n_image, h_grid, w_grid, -1)
-                        features = features[:, :h_grid_after_merge * merge_size, :w_grid_after_merge * merge_size, :].contiguous()
-                        features = features.view(n_image, h_grid_after_merge, merge_size, w_grid_after_merge, merge_size, -1)
-                        features = features.permute(0, 1, 3, 2, 4, 5).contiguous().to(self.visual.dtype)
-                        image_embeds_3d.append(self.merger(features))
+                    # Cache latest SAM3 tokens for external consumption (not fused to avoid shape mismatch)
+                    if sam3_obj_tokens is not None:
+                        self.last_sam3_obj_tokens = sam3_obj_tokens
+
+                    if not self.config.reference_frame == "first":
+                        features = torch.flip(features, dims=(0,))
+
+                    # using QwenPatchMerger
+                    features = features.view(n_image, h_grid, w_grid, -1)
+                    features = features[:, : h_grid_after_merge * merge_size, : w_grid_after_merge * merge_size, :].contiguous()
+                    features = features.view(n_image, h_grid_after_merge, merge_size, w_grid_after_merge, merge_size, -1)
+                    features = features.permute(0, 1, 3, 2, 4, 5).contiguous().to(self.visual.dtype)
+                    embeds_3d = self.merger(features)
+
+                    if vggt_use_cache and vggt_key is not None:
+                        embeds_cpu = embeds_3d.detach().to("cpu", dtype=torch.float16)
+                        _vggt_mem_put(vggt_key, embeds_cpu)
+                        cache_dir = _get_vggt_cache_dir()
+                        if cache_dir is not None and vggt_write_cache:
+                            _vggt_disk_save(cache_dir, vggt_key, embeds_cpu)
+
+                    image_embeds_3d.append(embeds_3d.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
 
                 image_embeds_3d = torch.cat(image_embeds_3d, dim=0).to(self.visual.dtype)
 
@@ -2141,9 +2260,137 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                         logger.info(
                             f"vggt_time_s={vggt_time:.3f}, frames={frame_count}, per_frame_s={per_frame:.4f}, batch={batch_size}"
                         )
+                    if vggt_use_cache and self._vggt_timing_counter % 20 == 0:
+                        logger.info(
+                            f"vggt_feature_cache: hits={vggt_cache_hits}, misses={vggt_cache_misses}, mem_entries={len(self._vggt_feature_cache_mem)}, dir={_get_vggt_cache_dir()}"
+                        )
+
+                # Optionally cache frozen vision tower outputs by image path to avoid repeated vision forward.
+                # This is particularly effective for VLN where history frames overlap heavily.
+                use_cache = bool(getattr(self.config, "vision_feature_cache", False)) and image_paths is not None
+                write_cache = bool(getattr(self.config, "vision_feature_cache_write", True))
+                cache_max_entries = int(getattr(self.config, "vision_feature_cache_max_entries", 128) or 128)
+
+                def _get_cache_dir() -> Optional[str]:
+                    base = getattr(self.config, "vision_feature_cache_dir", None) or getattr(self.config, "cache_dir", None)
+                    if base is None:
+                        return None
+                    return os.path.join(base, "vision_features")
+
+                def _mk_key(path: str, grid: torch.Tensor) -> str:
+                    merge = int(getattr(self.config.vision_config, "spatial_merge_size", 2) or 2)
+                    patch = int(getattr(self.config.vision_config, "patch_size", 14) or 14)
+                    grid_s = f"{int(grid[0].item())}x{int(grid[1].item())}x{int(grid[2].item())}"
+                    raw = f"{path}|merge={merge}|patch={patch}|grid={grid_s}"
+                    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+                def _mem_get(k: str):
+                    if k in self._vision_feature_cache_mem:
+                        v = self._vision_feature_cache_mem.pop(k)
+                        self._vision_feature_cache_mem[k] = v
+                        return v
+                    return None
+
+                def _mem_put(k: str, v_cpu: torch.Tensor):
+                    self._vision_feature_cache_mem[k] = v_cpu
+                    while len(self._vision_feature_cache_mem) > cache_max_entries:
+                        self._vision_feature_cache_mem.popitem(last=False)
+
+                def _cache_path(cache_dir: str, k: str) -> str:
+                    # Shard by prefix to avoid millions of files in a single directory.
+                    return os.path.join(cache_dir, k[:2], k[2:4], f"{k}.pt")
+
+                def _cache_path_legacy(cache_dir: str, k: str) -> str:
+                    # Backward-compatible path (older versions stored flat).
+                    return os.path.join(cache_dir, f"{k}.pt")
+
+                def _disk_load(cache_dir: str, k: str) -> Optional[torch.Tensor]:
+                    p = _cache_path(cache_dir, k)
+                    if not os.path.exists(p):
+                        p = _cache_path_legacy(cache_dir, k)
+                        if not os.path.exists(p):
+                            return None
+                    try:
+                        obj = torch.load(p, map_location="cpu")
+                        if isinstance(obj, dict) and "embeds" in obj:
+                            return obj["embeds"]
+                        if torch.is_tensor(obj):
+                            return obj
+                    except Exception:
+                        return None
+                    return None
+
+                def _disk_save(cache_dir: str, k: str, embeds_cpu: torch.Tensor):
+                    try:
+                        final_p = _cache_path(cache_dir, k)
+                        os.makedirs(os.path.dirname(final_p), exist_ok=True)
+                        tmp_p = final_p + f".tmp.{os.getpid()}"
+                        torch.save({"embeds": embeds_cpu}, tmp_p)
+                        os.replace(tmp_p, final_p)
+                    except Exception:
+                        pass
+
+                if use_cache:
+                    # image_paths can be List[List[str]] (batch) or List[str] (single)
+                    if isinstance(image_paths, list) and len(image_paths) > 0 and isinstance(image_paths[0], str):
+                        image_paths = [image_paths]
+
+                if use_cache and isinstance(image_paths, list) and isinstance(sample_id, list) and len(sample_id) != len(image_paths):
+                    # tolerate mismatched meta; just disable caching
+                    use_cache = False
 
                 pixel_values = pixel_values.type(self.visual.dtype)
-                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+
+                if use_cache:
+                    cache_dir = _get_cache_dir()
+                    img_ptr = 0
+                    pv_ptr = 0
+                    embeds_all = []
+                    cache_hits = 0
+                    cache_misses = 0
+                    # Flattened image order in batch follows collator: per instance then per image
+                    for b in range(len(image_paths)):
+                        paths_b = image_paths[b] or []
+                        for pth in paths_b:
+                            grid = image_grid_thw[img_ptr]
+                            patch_cnt = int(grid.prod().item())
+                            pv_slice = pixel_values[pv_ptr : pv_ptr + patch_cnt]
+                            grid_slice = image_grid_thw[img_ptr : img_ptr + 1]
+                            k = _mk_key(str(pth), grid)
+
+                            cached = _mem_get(k)
+                            if cached is None and cache_dir is not None:
+                                cached = _disk_load(cache_dir, k)
+                                if cached is not None:
+                                    _mem_put(k, cached)
+
+                            if cached is None:
+                                cache_misses += 1
+                                with torch.no_grad():
+                                    embeds = self.visual(pv_slice, grid_thw=grid_slice)
+                                cached = embeds.detach().to("cpu", dtype=torch.float16)
+                                _mem_put(k, cached)
+                                if cache_dir is not None and write_cache:
+                                    _disk_save(cache_dir, k, cached)
+                            else:
+                                cache_hits += 1
+
+                            embeds_all.append(cached.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
+                            img_ptr += 1
+                            pv_ptr += patch_cnt
+
+                    image_embeds = torch.cat(embeds_all, dim=0) if embeds_all else self.visual(pixel_values, grid_thw=image_grid_thw)
+
+                    if do_timing:
+                        if not hasattr(self, "_vision_cache_log_counter"):
+                            self._vision_cache_log_counter = 0
+                        self._vision_cache_log_counter += 1
+                        if self._vision_cache_log_counter % 20 == 0:
+                            logger.info(
+                                f"vision_feature_cache: hits={cache_hits}, misses={cache_misses}, mem_entries={len(self._vision_feature_cache_mem)}, dir={cache_dir}"
+                            )
+                else:
+                    image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 k = image_embeds.shape[0] // image_embeds_3d.shape[0]
                 image_embeds_3d = image_embeds_3d.repeat(k, 1)
                 image_embeds = image_embeds + self.lam * image_embeds_3d

@@ -104,3 +104,43 @@ class TrainingArguments(transformers.TrainingArguments):
         default=0.0,
         metadata={"help": "Only empty_cache when torch.cuda.memory_reserved() exceeds this GB threshold. 0 disables."},
     )
+
+    vision_feature_cache: bool = field(
+        default=False,
+        metadata={"help": "If True, cache frozen vision-tower outputs by image_paths to avoid repeated vision forward."},
+    )
+    vision_feature_cache_write: bool = field(
+        default=True,
+        metadata={"help": "If True, write missing vision features into cache when vision_feature_cache is enabled."},
+    )
+    vision_feature_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Override cache dir for vision features. Defaults to <cache_dir>/vision_features."},
+    )
+    vision_feature_cache_max_entries: int = field(
+        default=128,
+        metadata={"help": "Max in-memory cached images per rank when vision_feature_cache is enabled."},
+    )
+
+    vggt_feature_cache: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, cache frozen VGGT (3D) per-sample outputs by image_paths to avoid repeated VGGT forward."
+        },
+    )
+    vggt_feature_cache_write: bool = field(
+        default=True,
+        metadata={
+            "help": "If True, write missing VGGT features into cache when vggt_feature_cache is enabled."
+        },
+    )
+    vggt_feature_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Override cache dir for VGGT features. Defaults to <cache_dir>/vggt_features."
+        },
+    )
+    vggt_feature_cache_max_entries: int = field(
+        default=128,
+        metadata={"help": "Max in-memory cached samples per rank for VGGT feature cache."},
+    )

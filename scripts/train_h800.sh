@@ -55,6 +55,18 @@ torchrun \
     --output_dir "$OUTPUT_DIR" \
     --cache_dir "$CACHE_DIR" \
     --deepspeed "$DS_CONFIG" \
+    \
+    # 训练范式提速：冻结视觉塔时缓存视觉 token（VLN 历史帧高度重复，命中率上来后 step_time 会明显下降）
+    --vision_feature_cache True \
+    --vision_feature_cache_write True \
+    --vision_feature_cache_dir "$CACHE_DIR" \
+    --vision_feature_cache_max_entries 16384 \
+    \
+    # 同理：VGGT 是冻结的，也可以做“按样本历史帧序列”的缓存（epoch2 起通常接近满命中）
+    --vggt_feature_cache True \
+    --vggt_feature_cache_write True \
+    --vggt_feature_cache_dir "$CACHE_DIR" \
+    --vggt_feature_cache_max_entries 128 \
     --tune_mm_llm True \
     --tune_mm_vision False \
     --tune_mm_mlp True \

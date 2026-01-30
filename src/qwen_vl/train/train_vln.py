@@ -369,6 +369,20 @@ def train(attn_implementation="flash_attention_2"):
         config = AutoConfig.from_pretrained(model_args.model_name_or_path)
         setattr(config, "lam", model_args.lam)
         setattr(config, "reference_frame", model_args.reference_frame)
+        # vision feature caching (training paradigm improvement when vision towers are frozen)
+        setattr(config, "vision_feature_cache", bool(getattr(training_args, "vision_feature_cache", False)))
+        setattr(config, "vision_feature_cache_write", bool(getattr(training_args, "vision_feature_cache_write", True)))
+        setattr(config, "vision_feature_cache_dir", getattr(training_args, "vision_feature_cache_dir", None))
+        setattr(config, "vision_feature_cache_max_entries", int(getattr(training_args, "vision_feature_cache_max_entries", 128)))
+
+        # vggt feature caching (effective when VGGT is frozen; key is per-sample history image_paths)
+        setattr(config, "vggt_feature_cache", bool(getattr(training_args, "vggt_feature_cache", False)))
+        setattr(config, "vggt_feature_cache_write", bool(getattr(training_args, "vggt_feature_cache_write", True)))
+        setattr(config, "vggt_feature_cache_dir", getattr(training_args, "vggt_feature_cache_dir", None))
+        setattr(config, "vggt_feature_cache_max_entries", int(getattr(training_args, "vggt_feature_cache_max_entries", 128)))
+
+        # fallback base dir for cache if user doesn't override
+        setattr(config, "cache_dir", training_args.cache_dir or training_args.output_dir)
         model = Qwen2_5_VLForConditionalGenerationForJanusVLN.from_pretrained(
             pretrained_model_name_or_path=model_args.model_name_or_path,
             config=config,

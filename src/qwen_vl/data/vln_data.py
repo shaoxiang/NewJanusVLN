@@ -685,6 +685,8 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
             pixel_values=image_tensors,
             image_grid_thw=grid_thw,
             images_vggt=images_vggt,
+            image_paths=images,
+            sample_id=sample.get("id"),
             tag=sample.get("tag", "vln"),
             loss_weights=loss_weights,
             segment_ids=segment_ids,
@@ -773,6 +775,10 @@ class DataCollatorForSupervisedDataset:
             images_vggt = [torch.stack(instance["images_vggt"]) for instance in instances]
             batch["images_vggt"] = images_vggt
         batch["tag"] = instances[0].get("tag", "vln")
+
+        # pass-through meta for vision feature caching / debugging
+        batch["image_paths"] = [instance.get("image_paths") for instance in instances]
+        batch["sample_id"] = [instance.get("sample_id") for instance in instances]
         return batch
 
 
