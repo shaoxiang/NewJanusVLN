@@ -144,3 +144,10 @@ class TrainingArguments(transformers.TrainingArguments):
         default=128,
         metadata={"help": "Max in-memory cached samples per rank for VGGT feature cache."},
     )
+
+    auto_resume: bool = field(
+        default=True,
+        metadata={
+            "help": "If True, auto-resume from the latest checkpoint under output_dir when possible. Set False to avoid DeepSpeed resume issues when changing trainable/frozen params."
+        },
+    )

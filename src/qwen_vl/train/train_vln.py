@@ -450,6 +450,7 @@ def train(attn_implementation="flash_attention_2"):
 
     checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
     save_only_model = bool(getattr(training_args, "save_only_model", False))
+    auto_resume = bool(getattr(training_args, "auto_resume", True))
 
     def _ckpt_step(p: pathlib.Path) -> int:
         m = re.search(r"checkpoint-(\d+)$", p.name)
@@ -463,12 +464,26 @@ def train(attn_implementation="flash_attention_2"):
         )
 
     # If we only save model weights, DeepSpeed checkpoint state is typically absent; do not auto-resume.
-    if save_only_model and last_ckpt is not None:
+    if not auto_resume and last_ckpt is not None:
+        logging.warning("checkpoint found but auto_resume=False; skipping resume")
+        trainer.train()
+    elif save_only_model and last_ckpt is not None:
         logging.warning("checkpoint found but save_only_model=True; skipping resume")
         trainer.train()
     elif last_ckpt is not None and (not trainer.deepspeed or has_deepspeed_state):
         logging.info(f"checkpoint found, resume training from {last_ckpt}")
-        trainer.train(resume_from_checkpoint=str(last_ckpt))
+        try:
+            trainer.train(resume_from_checkpoint=str(last_ckpt))
+        except KeyError as e:
+            # Common with DeepSpeed ZeRO-3 when the set of frozen/trainable parameters differs from the checkpoint.
+            logging.exception(f"DeepSpeed resume failed due to KeyError: {e}")
+            logging.error(
+                "This usually means the current run's frozen/trainable parameter set differs from the checkpoint. "
+                "Fix by resuming with the exact same --tune_mm_* flags, or start a new run (new output_dir) and "
+                "set --model_name_or_path to the checkpoint directory to load weights only. "
+                "You can also set --auto_resume False to skip DeepSpeed resume."
+            )
+            raise
     else:
         if last_ckpt is not None and trainer.deepspeed and not has_deepspeed_state:
             logging.warning("checkpoint found but no DeepSpeed state; skipping resume")

@@ -67,6 +67,8 @@ torchrun \
     --vggt_feature_cache_write True \
     --vggt_feature_cache_dir "$CACHE_DIR" \
     --vggt_feature_cache_max_entries 128 \
+    # 如果你要从旧 checkpoint 改训练策略（比如改冻结/解冻），建议关掉自动 resume（避免 ZeRO3 不兼容报错）
+    --auto_resume True \
     --tune_mm_llm True \
     --tune_mm_vision False \
     --tune_mm_mlp True \
