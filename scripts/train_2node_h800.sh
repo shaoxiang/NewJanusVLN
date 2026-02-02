@@ -80,8 +80,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-./outputs/vln_2node_h800}"
 CACHE_DIR="${CACHE_DIR:-./cache}"
 DS_CONFIG="${DS_CONFIG:-./scripts/zero3.json}"
 
-# VGGT feature cache (set to enable precomputed features)
-VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"
+# VGGT feature cache (set to "true" to enable loading precomputed features)
+USE_VGGT_CACHE="${USE_VGGT_CACHE:-false}"
 
 # Validate paths
 if [[ ! -d "${MODEL_PATH}" ]]; then
@@ -152,8 +152,9 @@ fi
 
 # Build VGGT cache argument
 VGGT_CACHE_ARG=""
-if [[ -n "$VGGT_CACHE_DIR" ]] && [[ -d "$VGGT_CACHE_DIR" ]]; then
-  VGGT_CACHE_ARG="--vggt_cache_dir ${VGGT_CACHE_DIR}"
+if [[ "${USE_VGGT_CACHE}" == "true" ]]; then
+  VGGT_CACHE_ARG="--use_vggt_cache True"
+  echo "[ACCELERATION] VGGT feature cache enabled (loading from image directories)"
 fi
 
 echo "=" | head -c 80 && echo

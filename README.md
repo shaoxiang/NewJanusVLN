@@ -7,6 +7,30 @@ Training scaffold modeled after JanusVLN (including VGGT), with support for:
 
 The model is trained to output a structured response; all fields contribute to LM loss.
 
+## 🚀 快速开始
+
+### 训练加速（重要）
+
+**VGGT 缓存**可将训练速度提升 **3-5倍**（77.86s/it → 15-20s/it）！
+
+```bash
+# 1. 预计算 VGGT 特征（一次性，2-4 小时）
+python scripts/precompute_vggt_features.py \
+  --model_path /path/to/Qwen2.5-VL-3B-Instruct \
+  --vggt_model_path /path/to/VGGT-1B \
+  --data_root /path/to/train_data \
+  --batch_size 4
+
+# 2. 启用缓存训练
+export USE_VGGT_CACHE=true
+bash scripts/train_h800.sh
+```
+
+详细文档：
+- 📘 快速入门：[VGGT_CACHE_QUICKSTART.md](VGGT_CACHE_QUICKSTART.md)
+- 📗 详细指南：[docs/VGGT_CACHE_SIMPLIFIED.md](docs/VGGT_CACHE_SIMPLIFIED.md)
+- 📙 方案对比：[docs/VGGT_CACHE_COMPARISON.md](docs/VGGT_CACHE_COMPARISON.md)
+
 ## Layout
 
 ```

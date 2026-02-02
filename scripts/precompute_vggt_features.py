@@ -3,15 +3,16 @@
 Precompute VGGT visual features for training acceleration.
 
 This script processes all training images through the frozen VGGT encoder
-and saves the features to disk. During training, features are loaded directly,
-bypassing the expensive VGGT forward pass (3-5x speedup).
+and saves the features next to the image files. During training, features 
+are loaded directly, bypassing the expensive VGGT forward pass (3-5x speedup).
+
+Cache files are stored as: <image_path>.vggt_cache.pt
 
 Usage:
     python scripts/precompute_vggt_features.py \
         --model_path /path/to/model \
         --vggt_model_path /path/to/vggt \
         --data_root /path/to/train_data \
-        --cache_dir /path/to/feature_cache \
         --batch_size 4 \
         --num_workers 4
 """
@@ -41,7 +42,6 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to Qwen2.5-VL model")
     parser.add_argument("--vggt_model_path", type=str, required=True, help="Path to VGGT model")
     parser.add_argument("--data_root", type=str, required=True, help="Path to training data root")
-    parser.add_argument("--cache_dir", type=str, required=True, help="Output directory for cached features")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for processing")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of data loading workers")
     parser.add_argument("--max_samples", type=int, default=-1, help="Max samples to process (-1 for all)")
@@ -51,13 +51,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_image_hash(image_path: str) -> str:
-    """Compute unique hash for an image file."""
-    hasher = hashlib.sha256()
-    hasher.update(image_path.encode("utf-8"))
-    with open(image_path, "rb") as f:
-        hasher.update(f.read())
-    return hasher.hexdigest()[:16]
+def get_cache_path(image_path: str) -> str:
+    """Get cache file path for an image (stored next to the image)."""
+    return f"{image_path}.vggt_cache.pt"
 
 
 def collect_all_images(data_root: str) -> List[Dict]:
@@ -111,7 +107,6 @@ def collect_all_images(data_root: str) -> List[Dict]:
                 image_map[img_full] = {
                     "path": img_full,
                     "sample_indices": [sample_idx],
-                    "hash": get_image_hash(img_full),
                 }
             else:
                 image_map[img_full]["sample_indices"].append(sample_idx)
@@ -126,7 +121,6 @@ def process_images_batch(
     model,
     processor,
     image_batch: List[Dict],
-    cache_dir: Path,
     device: str,
     skip_existing: bool,
 ) -> int:
@@ -134,8 +128,8 @@ def process_images_batch(
     # Filter out already cached
     to_process = []
     for img_meta in image_batch:
-        cache_path = cache_dir / f"{img_meta['hash']}.pt"
-        if skip_existing and cache_path.exists():
+        cache_path = get_cache_path(img_meta['path'])
+        if skip_existing and os.path.exists(cache_path):
             continue
         to_process.append(img_meta)
     
@@ -202,13 +196,12 @@ def process_images_batch(
                     features = aggregated_tokens[-2][0, :, patch_start_idx:]
                     features_batch.append(features.cpu())
         
-        # Save features
+        # Save features next to images
         for features, img_meta in zip(features_batch, valid_metas):
-            cache_path = cache_dir / f"{img_meta['hash']}.pt"
+            cache_path = get_cache_path(img_meta["path"])
             torch.save({
                 "features": features,
                 "path": img_meta["path"],
-                "hash": img_meta["hash"],
             }, cache_path)
         
         return len(features_batch)
@@ -220,15 +213,15 @@ def process_images_batch(
         return 0
 
 
-def verify_cache(cache_dir: Path, image_list: List[Dict]):
+def verify_cache(image_list: List[Dict]):
     """Verify cached features are valid."""
     print("\n[INFO] Verifying cached features...")
     valid = 0
     invalid = []
     
     for img_meta in tqdm(image_list, desc="Verifying"):
-        cache_path = cache_dir / f"{img_meta['hash']}.pt"
-        if not cache_path.exists():
+        cache_path = get_cache_path(img_meta["path"])
+        if not os.path.exists(cache_path):
             invalid.append(img_meta["path"])
             continue
         
@@ -255,13 +248,9 @@ def main():
     print(f"Model path: {args.model_path}")
     print(f"VGGT model path: {args.vggt_model_path}")
     print(f"Data root: {args.data_root}")
-    print(f"Cache dir: {args.cache_dir}")
+    print(f"Cache mode: Store next to images (*.vggt_cache.pt)")
     print(f"Device: {args.device}")
     print("=" * 80)
-    
-    # Create cache directory
-    cache_dir = Path(args.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Collect all images
     image_list = collect_all_images(args.data_root)
@@ -291,26 +280,27 @@ def main():
     for i in tqdm(range(0, len(image_list), args.batch_size), desc="Processing"):
         batch = image_list[i:i + args.batch_size]
         n = process_images_batch(
-            model, processor, batch, cache_dir, args.device, args.skip_existing
+            model, processor, batch, args.device, args.skip_existing
         )
         processed += n
     
     print(f"\n[SUCCESS] Processed {processed} images")
-    print(f"[INFO] Cache directory: {cache_dir}")
+    print(f"[INFO] Cache files stored next to images as: <image_path>.vggt_cache.pt")
     
     # Verify if requested
     if args.verify:
-        verify_cache(cache_dir, image_list)
+        verify_cache(image_list)
     
     # Write manifest
-    manifest_path = cache_dir / "manifest.json"
+    manifest_path = os.path.join(args.data_root, "vggt_cache_manifest.json")
     with open(manifest_path, "w") as f:
         json.dump({
             "total_images": len(image_list),
-            "cache_dir": str(cache_dir),
+            "processed_images": processed,
             "model_path": args.model_path,
             "vggt_model_path": args.vggt_model_path,
             "data_root": args.data_root,
+            "cache_format": "<image_path>.vggt_cache.pt",
         }, f, indent=2)
     print(f"[INFO] Manifest saved to {manifest_path}")
 

@@ -10,7 +10,10 @@ class ModelArguments:
     tune_mm_mlp: bool = field(default=False)
     tune_mm_vision: bool = field(default=False)
     vggt_model_path: str = field(default="facebook/VGGT-1B/")
-    vggt_cache_dir: str = field(default=None, metadata={"help": "Directory with precomputed VGGT features"})
+    use_vggt_cache: bool = field(
+        default=False, 
+        metadata={"help": "Enable loading precomputed VGGT features (stored as <image>.vggt_cache.pt)"}
+    )
     lam: float = field(default=0.2)
     distill_loss_weight: float = field(default=1.0)
     reference_frame: str = field(default="last")

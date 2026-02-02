@@ -119,9 +119,9 @@ fi
 # =========================================================
 # Build VGGT cache argument
 VGGT_CACHE_ARG=""
-if [[ -n "${VGGT_CACHE_DIR:-}" ]] && [[ -d "${VGGT_CACHE_DIR}" ]]; then
-  VGGT_CACHE_ARG="--vggt_cache_dir ${VGGT_CACHE_DIR}"
-  echo "[ACCELERATION] VGGT feature cache enabled: ${VGGT_CACHE_DIR}"
+if [[ "${USE_VGGT_CACHE:-false}" == "true" ]]; then
+  VGGT_CACHE_ARG="--use_vggt_cache True"
+  echo "[ACCELERATION] VGGT feature cache enabled (loading from image directories)"
 fi
 
 # NOTE: we tee logs; if anything fails, you will still see it in console.

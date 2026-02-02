@@ -542,33 +542,22 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
         self.data_args.image_processor.max_pixels = data_args.max_pixels
         self.data_args.image_processor.min_pixels = data_args.min_pixels
         
-        # VGGT feature cache support
-        self.vggt_cache_dir = getattr(data_args, "vggt_cache_dir", None)
-        if self.vggt_cache_dir and os.path.exists(self.vggt_cache_dir):
-            print(f"[INFO] VGGT feature cache enabled: {self.vggt_cache_dir}")
-        else:
-            self.vggt_cache_dir = None
+        # VGGT feature cache support (cache stored next to images)
+        self.use_vggt_cache = getattr(data_args, "use_vggt_cache", False)
+        if self.use_vggt_cache:
+            print(f"[INFO] VGGT feature cache enabled (loading from image directories)")
 
         if data_args.model_type == "qwen2.5vl":
             self.get_rope_index = get_rope_index_25
         else:
             self.get_rope_index = get_rope_index_2
     
-    def _get_image_hash(self, image_path: str) -> str:
-        """Compute hash for image (must match precompute script)."""
-        hasher = hashlib.sha256()
-        hasher.update(image_path.encode("utf-8"))
-        with open(image_path, "rb") as f:
-            hasher.update(f.read())
-        return hasher.hexdigest()[:16]
-    
     def _load_cached_vggt_features(self, image_path: str):
-        """Load precomputed VGGT features if available."""
-        if not self.vggt_cache_dir:
+        """Load precomputed VGGT features if available (from same directory as image)."""
+        if not self.use_vggt_cache:
             return None
         
-        img_hash = self._get_image_hash(image_path)
-        cache_path = os.path.join(self.vggt_cache_dir, f"{img_hash}.pt")
+        cache_path = f"{image_path}.vggt_cache.pt"
         
         if os.path.exists(cache_path):
             try:
