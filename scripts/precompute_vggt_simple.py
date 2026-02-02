@@ -27,7 +27,7 @@ from torchvision import transforms
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from qwen_vl.model.vggt.model import VGGT
+from qwen_vl.model.vggt.models.vggt import VGGT
 
 
 def parse_args():
@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--skip_existing", action="store_true", help="Skip already cached features")
     parser.add_argument("--max_samples", type=int, default=-1, help="Max images to process (-1 for all)")
+    parser.add_argument("--image_list_file", type=str, default=None, help="Pre-generated image list file (for multi-GPU)")
     return parser.parse_args()
 
 
@@ -46,8 +47,17 @@ def get_cache_path(image_path: str) -> str:
     return f"{image_path}.vggt_cache.pt"
 
 
-def collect_all_images(data_root: str) -> List[str]:
-    """Collect all image paths from training data."""
+def collect_all_images(data_root: str, image_list_file: str = None) -> List[str]:
+    """Collect all image paths from training data or pre-generated list."""
+    
+    # If image list file is provided (multi-GPU mode), read from it
+    if image_list_file and os.path.exists(image_list_file):
+        print(f"[INFO] Reading image list from: {image_list_file}")
+        with open(image_list_file, "r") as f:
+            image_list = [line.strip() for line in f if line.strip()]
+        print(f"[INFO] Loaded {len(image_list)} images from file")
+        return image_list
+    
     print(f"[INFO] Scanning data root: {data_root}")
     
     # Find all JSONL files
@@ -251,7 +261,7 @@ def main():
     print("=" * 80)
     
     # Collect all images
-    image_list = collect_all_images(args.data_root)
+    image_list = collect_all_images(args.data_root, args.image_list_file)
     
     if not image_list:
         print("[ERROR] No images found!")

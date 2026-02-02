@@ -13,23 +13,29 @@ The model is trained to output a structured response; all fields contribute to L
 
 **VGGT 缓存**可将训练速度提升 **3-5倍**（77.86s/it → 15-20s/it）！
 
-```bash
-# 1. 预计算 VGGT 特征（一次性，2-4 小时）
-python scripts/precompute_vggt_features.py \
-  --model_path /path/to/Qwen2.5-VL-3B-Instruct \
-  --vggt_model_path /path/to/VGGT-1B \
-  --data_root /path/to/train_data \
-  --batch_size 4
+#### 单 GPU 预计算
 
-# 2. 启用缓存训练
+```bash
+bash scripts/run_precompute.sh
+```
+
+#### 8 GPU 并行预计算（推荐，速度提升 8 倍）⚡
+
+```bash
+bash scripts/precompute_8gpu.sh
+```
+
+#### 启用缓存训练
+
+```bash
 export USE_VGGT_CACHE=true
 bash scripts/train_h800.sh
 ```
 
 详细文档：
 - 📘 快速入门：[VGGT_CACHE_QUICKSTART.md](VGGT_CACHE_QUICKSTART.md)
-- 📗 详细指南：[docs/VGGT_CACHE_SIMPLIFIED.md](docs/VGGT_CACHE_SIMPLIFIED.md)
-- 📙 方案对比：[docs/VGGT_CACHE_COMPARISON.md](docs/VGGT_CACHE_COMPARISON.md)
+- 📗 8 GPU 并行：[FIXED_8GPU.md](FIXED_8GPU.md) ⭐
+- 📙 详细指南：[docs/VGGT_CACHE_SIMPLIFIED.md](docs/VGGT_CACHE_SIMPLIFIED.md)
 
 ## Layout
 
