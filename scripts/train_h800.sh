@@ -66,10 +66,8 @@ DATA_ROOT="/public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_Data/trajector
 OUTPUT_DIR="/public/home/vlabadmin/dataset/NewJanusVLN/outputs/vln_h800_8gpu"
 CACHE_DIR="./cache"
 
-# VGGT feature cache (set to enable precomputed features for 3-5x speedup)
-VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"
-
-DS_CONFIG="scripts/zero3.json"
+# DeepSpeed config (override via env, e.g. DS_CONFIG=scripts/zero2.json)
+DS_CONFIG="${DS_CONFIG:-scripts/zero3.json}"
 
 # Validate paths early (avoid silent exit)
 if [[ ! -f "${DS_CONFIG}" ]]; then
@@ -105,7 +103,24 @@ LOG_FILE="${OUTPUT_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
 echo "[INFO] Logging to: ${LOG_FILE}"
 
 # =========================================================
-# 3. Launcher selection
+# 3. Training Hyperparameters
+# =========================================================
+PER_DEVICE_BATCH=${PER_DEVICE_BATCH:-1}
+GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS:-8}
+LEARNING_RATE=${LEARNING_RATE:-2e-5}
+NUM_EPOCHS=${NUM_EPOCHS:-3}
+MAX_HISTORY_IMAGES=${MAX_HISTORY_IMAGES:-8}
+
+echo "[INFO] Training config:"
+echo "  Per-device batch: ${PER_DEVICE_BATCH}"
+echo "  Gradient accumulation: ${GRAD_ACCUM_STEPS}"
+echo "  Effective batch size: $((PER_DEVICE_BATCH * NPROC_PER_NODE * GRAD_ACCUM_STEPS))"
+echo "  Learning rate: ${LEARNING_RATE}"
+echo "  Epochs: ${NUM_EPOCHS}"
+echo "  Max history images: ${MAX_HISTORY_IMAGES}"
+
+# =========================================================
+# 4. Launcher selection
 # =========================================================
 if command -v torchrun >/dev/null 2>&1; then
   LAUNCHER=(torchrun)
@@ -117,12 +132,6 @@ fi
 # =========================================================
 # 4. Training command
 # =========================================================
-# Build VGGT cache argument
-VGGT_CACHE_ARG=""
-if [[ "${USE_VGGT_CACHE:-false}" == "true" ]]; then
-  VGGT_CACHE_ARG="--use_vggt_cache True"
-  echo "[ACCELERATION] VGGT feature cache enabled (loading from image directories)"
-fi
 
 # NOTE: we tee logs; if anything fails, you will still see it in console.
 "${LAUNCHER[@]}" \
@@ -135,22 +144,21 @@ fi
   --train_data_root "${DATA_ROOT}" \
   --output_dir "${OUTPUT_DIR}" \
   --cache_dir "${CACHE_DIR}" \
-  ${VGGT_CACHE_ARG} \
   --deepspeed "${DS_CONFIG}" \
   --tune_mm_llm True \
   --tune_mm_vision False \
   --tune_mm_mlp True \
   --bf16 True \
   --bf16_full_eval True \
-  --per_device_train_batch_size 1 \
+  --per_device_train_batch_size ${PER_DEVICE_BATCH} \
   --per_device_eval_batch_size 1 \
-  --gradient_accumulation_steps 8 \
-  --learning_rate 2e-5 \
+  --gradient_accumulation_steps ${GRAD_ACCUM_STEPS} \
+  --learning_rate ${LEARNING_RATE} \
   --mm_projector_lr 1e-5 \
   --vision_tower_lr 1e-6 \
   --model_max_length 163840 \
-  --num_train_epochs 3 \
-  --max_history_images 8 \
+  --num_train_epochs ${NUM_EPOCHS} \
+  --max_history_images ${MAX_HISTORY_IMAGES} \
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine" \
   --logging_steps 10 \

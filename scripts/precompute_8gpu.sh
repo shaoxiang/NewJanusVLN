@@ -20,7 +20,7 @@ DATA_ROOT="${DATA_ROOT:-/public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_D
 NUM_GPUS="${NUM_GPUS:-8}"
 
 # 每个 GPU 的批量大小
-BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-32}"
+BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-2048}"
 
 # ===== 以下无需修改 =====
 
@@ -179,7 +179,6 @@ for gpu_id in $(seq 0 $((NUM_GPUS - 1))); do
         --data_root "${DATA_ROOT}" \
         --batch_size "${BATCH_SIZE_PER_GPU}" \
         --device "cuda:0" \
-        --skip_existing \
         --image_list_file "${GPU_IMAGE_LIST}" \
         > "${LOG_FILE}" 2>&1 &
     
@@ -234,9 +233,7 @@ echo ""
 if [[ ${FAILED_COUNT} -eq 0 ]]; then
     echo "[成功] 所有 GPU 处理完成！"
     echo ""
-    echo "接下来启用缓存训练："
-    echo "  export USE_VGGT_CACHE=true"
-    echo "  bash scripts/train_h800.sh"
+    echo "提示：当前训练代码已移除 VGGT 缓存读取，这些 .vggt_cache.pt 不会被训练使用。"
 else
     echo "[警告] 部分 GPU 处理失败，请检查日志："
     echo "  ${LOG_DIR}/"

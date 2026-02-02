@@ -2063,78 +2063,62 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                 batch_size = inputs_embeds.shape[0]
                 raw_images = raw_images if raw_images is not None else [None] * batch_size
                 
-                # Extract cached features if provided
-                vggt_cached = kwargs.pop("vggt_features_cached", None)
-                
                 image_embeds_3d = []
                 teacher_outputs = []
                 for i in range(batch_size):
                     if images_vggt[i].shape[0] > 0:
-                        # Check if all frames have cached features
-                        use_cache = False
-                        if vggt_cached is not None and i < len(vggt_cached):
-                            cached_list = vggt_cached[i]
-                            if cached_list and all(c is not None for c in cached_list):
-                                use_cache = True
-                        
-                        if use_cache and self.training:
-                            # Use precomputed features (training only, skip VGGT forward)
-                            # Stack all cached features for this sample
-                            cached_features = cached_list[-1]  # Use last frame features
-                            features = cached_features.to(images_vggt[i].device, dtype=self.visual.dtype)
-                        else:
-                            # Original VGGT forward pass
-                            n_image = 1
-                            height, width = images_vggt[i].shape[-2:]
-                            patch_size = self.config.vision_config.patch_size
-                            merge_size = self.config.vision_config.spatial_merge_size
-                            h_grid, w_grid = height // patch_size, width // patch_size
-                            h_grid_after_merge, w_grid_after_merge = h_grid // merge_size, w_grid // merge_size
-                            new_height = h_grid_after_merge * (patch_size * merge_size)
-                            new_width = w_grid_after_merge * (patch_size * merge_size)
+                        # VGGT forward pass
+                        n_image = 1
+                        height, width = images_vggt[i].shape[-2:]
+                        patch_size = self.config.vision_config.patch_size
+                        merge_size = self.config.vision_config.spatial_merge_size
+                        h_grid, w_grid = height // patch_size, width // patch_size
+                        h_grid_after_merge, w_grid_after_merge = h_grid // merge_size, w_grid // merge_size
+                        new_height = h_grid_after_merge * (patch_size * merge_size)
+                        new_width = w_grid_after_merge * (patch_size * merge_size)
 
-                            dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-                            sam3_obj_tokens = None
-                            # Run SAM3 on the last raw image (if provided) to get optional object tokens.
-                            if self.use_sam3 and raw_images[i] is not None:
-                                sam3_obj_tokens = self._run_sam3(raw_images[i])
+                        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+                        sam3_obj_tokens = None
+                        # Run SAM3 on the last raw image (if provided) to get optional object tokens.
+                        if self.use_sam3 and raw_images[i] is not None:
+                            sam3_obj_tokens = self._run_sam3(raw_images[i])
 
-                            with torch.no_grad():
-                                with torch.cuda.amp.autocast(dtype=dtype):
-                                    if not self.config.reference_frame=="first":
-                                        images_vggt[i] = torch.flip(images_vggt[i], dims=(0,))
-                                    
-                                    if self.mode == "evaluation": 
-                                        if self.past_key_values_vggt is None:
-                                            self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
-                                    else:
+                        with torch.no_grad():
+                            with torch.cuda.amp.autocast(dtype=dtype):
+                                if not self.config.reference_frame=="first":
+                                    images_vggt[i] = torch.flip(images_vggt[i], dims=(0,))
+                                
+                                if self.mode == "evaluation": 
+                                    if self.past_key_values_vggt is None:
                                         self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
+                                else:
+                                    self.past_key_values_vggt = [None] * self.vggt.aggregator.depth
 
-                                    for k, frame in enumerate(images_vggt[i]):
-                                        images = frame.unsqueeze(0).unsqueeze(0) 
-                                        aggregator_output = self.vggt.aggregator(
-                                            images, 
-                                            past_key_values=self.past_key_values_vggt,
-                                            use_cache=True, 
-                                            past_frame_idx=k
-                                        )
-                                        
-                                        if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
-                                            aggregated_tokens, patch_start_idx, past_key_values_vggt = aggregator_output
-                                        else:
-                                            aggregated_tokens, patch_start_idx = aggregator_output
+                                for k, frame in enumerate(images_vggt[i]):
+                                    images = frame.unsqueeze(0).unsqueeze(0) 
+                                    aggregator_output = self.vggt.aggregator(
+                                        images, 
+                                        past_key_values=self.past_key_values_vggt,
+                                        use_cache=True, 
+                                        past_frame_idx=k
+                                    )
+                                    
+                                    if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
+                                        aggregated_tokens, patch_start_idx, past_key_values_vggt = aggregator_output
+                                    else:
+                                        aggregated_tokens, patch_start_idx = aggregator_output
 
-                                        self.past_key_values_vggt = past_key_values_vggt
-                                        if self.mode == "evaluation" and self.past_key_values_vggt is not None:
-                                            self.past_key_values_vggt = self.kv_cache_vggt(self.past_key_values_vggt)
+                                    self.past_key_values_vggt = past_key_values_vggt
+                                    if self.mode == "evaluation" and self.past_key_values_vggt is not None:
+                                        self.past_key_values_vggt = self.kv_cache_vggt(self.past_key_values_vggt)
 
-                                        features = aggregated_tokens[-2][0,:, patch_start_idx:]
-                            # Cache latest SAM3 tokens for external consumption (not fused to avoid shape mismatch)
-                            if sam3_obj_tokens is not None:
-                                self.last_sam3_obj_tokens = sam3_obj_tokens
+                                    features = aggregated_tokens[-2][0,:, patch_start_idx:]
+                        # Cache latest SAM3 tokens for external consumption (not fused to avoid shape mismatch)
+                        if sam3_obj_tokens is not None:
+                            self.last_sam3_obj_tokens = sam3_obj_tokens
 
-                            if not self.config.reference_frame=="first":
-                                features = torch.flip(features, dims=(0,))
+                        if not self.config.reference_frame=="first":
+                            features = torch.flip(features, dims=(0,))
 
                         # using QwenPatchMerger (共用后处理逻辑)
                         n_image = 1

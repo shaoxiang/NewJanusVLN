@@ -541,42 +541,17 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
         self.data_args = data_args
         self.data_args.image_processor.max_pixels = data_args.max_pixels
         self.data_args.image_processor.min_pixels = data_args.min_pixels
-        
-        # VGGT feature cache support (cache stored next to images)
-        self.use_vggt_cache = getattr(data_args, "use_vggt_cache", False)
-        if self.use_vggt_cache:
-            print(f"[INFO] VGGT feature cache enabled (loading from image directories)")
 
         if data_args.model_type == "qwen2.5vl":
             self.get_rope_index = get_rope_index_25
         else:
             self.get_rope_index = get_rope_index_2
-    
-    def _load_cached_vggt_features(self, image_path: str):
-        """Load precomputed VGGT features if available (from same directory as image)."""
-        if not self.use_vggt_cache:
-            return None
-        
-        cache_path = f"{image_path}.vggt_cache.pt"
-        
-        if os.path.exists(cache_path):
-            try:
-                data = torch.load(cache_path, map_location="cpu")
-                return data["features"]
-            except Exception as e:
-                print(f"[WARN] Failed to load cache {cache_path}: {e}")
-                return None
-        return None
 
     def __len__(self):
         return len(self.list_data_dict)
 
     def process_image_unified_vggt(self, image_file: str):
-        """Process image with optional VGGT feature caching."""
-        # Try loading cached features first
-        cached_features = self._load_cached_vggt_features(image_file)
-        
-        # Always process Qwen visual (not cached, needed for pixel_values)
+        """Process image for VGGT."""
         image_processor = copy.deepcopy(self.data_args.image_processor)
         from qwen_vl.model.vggt.utils.load_fn import load_and_preprocess_images
         images = load_and_preprocess_images([image_file], mode="pad")
@@ -614,7 +589,6 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
             "pixel_values": image_tensor,
             "image_grid_thw": grid_thw,
             "images_vggt": images_vggt,
-            "vggt_features_cached": cached_features,
         }
 
     def _extract_fields(self, sample: Dict):
@@ -695,13 +669,11 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
         image_tensors = []
         grid_thw = []
         images_vggt = []
-        vggt_features_cached_list = []
         for image_path in images:
             ret = self.process_image_unified_vggt(image_path)
             image_tensors.append(ret["pixel_values"])
             images_vggt.append(ret["images_vggt"])
             grid_thw.append(ret["image_grid_thw"])
-            vggt_features_cached_list.append(ret["vggt_features_cached"])
 
         merge_size = getattr(self.data_args.image_processor, "merge_size", 2)
         grid_thw_merged = [
@@ -751,7 +723,6 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
             pixel_values=image_tensors,
             image_grid_thw=grid_thw,
             images_vggt=images_vggt,
-            vggt_features_cached=vggt_features_cached_list,
             tag=sample.get("tag", "vln"),
             loss_weights=loss_weights,
             segment_ids=segment_ids,
@@ -843,15 +814,6 @@ class DataCollatorForSupervisedDataset:
         if "images_vggt" in instances[0]:
             images_vggt = [torch.stack(instance["images_vggt"]) for instance in instances]
             batch["images_vggt"] = images_vggt
-        
-        # Add cached VGGT features if available
-        if "vggt_features_cached" in instances[0]:
-            vggt_cached = []
-            for instance in instances:
-                cached_list = instance["vggt_features_cached"]
-                # Pad None for images without cache
-                vggt_cached.append(cached_list if cached_list else [None] * len(instance["images_vggt"]))
-            batch["vggt_features_cached"] = vggt_cached
         
         batch["tag"] = instances[0].get("tag", "vln")
         return batch

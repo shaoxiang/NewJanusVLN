@@ -51,6 +51,15 @@ if [[ $NNODES -gt 1 ]]; then
   export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0} # Network interface
   export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-5}  # GPU Direct RDMA
   export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}    # RoCE mode
+  export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-22}       # IB timeout (default: 18)
+  export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-7}    # IB retry count
+  
+  # Advanced NCCL tuning for H800
+  export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}          # Disable cross-NIC for better stability
+  export NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-SYS}        # P2P level
+  export NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-0}      # Enable shared memory
+  export NCCL_BUFFSIZE=${NCCL_BUFFSIZE:-8388608}      # Buffer size (8MB)
+  export NCCL_NTHREADS=${NCCL_NTHREADS:-640}          # NCCL threads for H800
   
   # NCCL debugging (comment out for production)
   export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
@@ -62,6 +71,8 @@ fi
 # Distributed training environment
 export PYTHONUNBUFFERED=1
 export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-DETAIL}
+export OMP_NUM_THREADS=8
+export CUDA_LAUNCH_BLOCKING=0
 
 # Python and paths
 PY=${PY:-python}
@@ -79,9 +90,6 @@ DATA_ROOT="${DATA_ROOT:-/path/to/train_data}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/vln_2node_h800}"
 CACHE_DIR="${CACHE_DIR:-./cache}"
 DS_CONFIG="${DS_CONFIG:-./scripts/zero3.json}"
-
-# VGGT feature cache (set to "true" to enable loading precomputed features)
-USE_VGGT_CACHE="${USE_VGGT_CACHE:-false}"
 
 # Validate paths
 if [[ ! -d "${MODEL_PATH}" ]]; then
@@ -132,10 +140,6 @@ echo "  Learning rate: $LEARNING_RATE"
 echo "  Epochs: $NUM_EPOCHS"
 echo "  Max history images: $MAX_HISTORY_IMAGES"
 
-if [[ -n "$VGGT_CACHE_DIR" ]] && [[ -d "$VGGT_CACHE_DIR" ]]; then
-  echo "  [ACCELERATION] VGGT cache enabled: $VGGT_CACHE_DIR"
-fi
-
 # =========================================================
 # 4. Launcher Selection
 # =========================================================
@@ -149,13 +153,6 @@ fi
 # =========================================================
 # 5. Training Command
 # =========================================================
-
-# Build VGGT cache argument
-VGGT_CACHE_ARG=""
-if [[ "${USE_VGGT_CACHE}" == "true" ]]; then
-  VGGT_CACHE_ARG="--use_vggt_cache True"
-  echo "[ACCELERATION] VGGT feature cache enabled (loading from image directories)"
-fi
 
 echo "=" | head -c 80 && echo
 echo "[START] Training begins at $(date)"
@@ -173,7 +170,6 @@ echo "=" | head -c 80 && echo
   --train_data_root "${DATA_ROOT}" \
   --output_dir "${OUTPUT_DIR}" \
   --cache_dir "${CACHE_DIR}" \
-  ${VGGT_CACHE_ARG} \
   --deepspeed "${DS_CONFIG}" \
   --tune_mm_llm True \
   --tune_mm_vision False \
@@ -202,6 +198,8 @@ echo "=" | head -c 80 && echo
   --dataloader_pin_memory True \
   --dataloader_prefetch_factor 4 \
   --gradient_checkpointing True \
+  --ddp_timeout 7200 \
+  --ddp_find_unused_parameters False \
   --report_to "tensorboard" \
   --group_by_modality_length True \
   --data_flatten False \
