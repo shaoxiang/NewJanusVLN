@@ -66,6 +66,9 @@ DATA_ROOT="/public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_Data/trajector
 OUTPUT_DIR="/public/home/vlabadmin/dataset/NewJanusVLN/outputs/vln_h800_8gpu"
 CACHE_DIR="./cache"
 
+# VGGT feature cache (set to enable precomputed features for 3-5x speedup)
+VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"
+
 DS_CONFIG="scripts/zero3.json"
 
 # Validate paths early (avoid silent exit)
@@ -114,6 +117,13 @@ fi
 # =========================================================
 # 4. Training command
 # =========================================================
+# Build VGGT cache argument
+VGGT_CACHE_ARG=""
+if [[ -n "${VGGT_CACHE_DIR:-}" ]] && [[ -d "${VGGT_CACHE_DIR}" ]]; then
+  VGGT_CACHE_ARG="--vggt_cache_dir ${VGGT_CACHE_DIR}"
+  echo "[ACCELERATION] VGGT feature cache enabled: ${VGGT_CACHE_DIR}"
+fi
+
 # NOTE: we tee logs; if anything fails, you will still see it in console.
 "${LAUNCHER[@]}" \
   --nproc_per_node="${NPROC_PER_NODE}" \
@@ -125,6 +135,7 @@ fi
   --train_data_root "${DATA_ROOT}" \
   --output_dir "${OUTPUT_DIR}" \
   --cache_dir "${CACHE_DIR}" \
+  ${VGGT_CACHE_ARG} \
   --deepspeed "${DS_CONFIG}" \
   --tune_mm_llm True \
   --tune_mm_vision False \
@@ -149,7 +160,9 @@ fi
   --eval_steps 300000 \
   --eval_split_ratio 0.0 \
   --eval_num_samples 2 \
-  --dataloader_num_workers 8 \
+  --dataloader_num_workers 16 \
+  --dataloader_pin_memory True \
+  --dataloader_prefetch_factor 4 \
   --gradient_checkpointing True \
   --report_to "tensorboard" \
   --group_by_modality_length True \
