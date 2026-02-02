@@ -3,14 +3,51 @@
 ## 一分钟上手
 
 ### 1️⃣ 预计算（一次性）
+
+**方式 1：一键运行（推荐）**
 ```bash
-python scripts/precompute_vggt_features.py \
-  --model_path /path/to/Qwen2.5-VL-3B-Instruct \
+# 编辑脚本修改路径
+vim scripts/run_precompute.sh
+
+# 运行
+bash scripts/run_precompute.sh
+```
+
+**方式 2：环境变量**
+```bash
+VGGT_MODEL_PATH=/path/to/VGGT-1B \
+DATA_ROOT=/path/to/train_data \
+BATCH_SIZE=16 \
+bash scripts/run_precompute.sh
+```
+
+**方式 3：直接调用 Python（高级）**
+```bash
+export PYTHONPATH=$PWD/src
+python scripts/precompute_vggt_simple.py \
   --vggt_model_path /path/to/VGGT-1B \
   --data_root /path/to/train_data \
-  --batch_size 4 \
+  --batch_size 16 \
   --skip_existing
 ```
+
+MODEL_PATH="/public/home/vlabadmin/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-7B-Instruct"
+VGGT_MODEL_PATH="/public/home/vlabadmin/.cache/modelscope/hub/models/facebook/VGGT-1B"
+
+DATA_ROOT="/public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_Data/trajectory_data/R2R-CE-640x480/train"
+OUTPUT_DIR="/public/home/vlabadmin/dataset/NewJanusVLN/outputs/vln_h800_8gpu"
+CACHE_DIR="./cache"
+
+```bash
+python scripts/precompute_vggt_features.py \
+  --model_path /public/home/vlabadmin/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-7B-Instruct \
+  --vggt_model_path /public/home/vlabadmin/.cache/modelscope/hub/models/facebook/VGGT-1B \
+  --data_root /public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_Data/trajectory_data/R2R-CE-640x480/train \
+  --batch_size 32 \
+  --skip_existing
+```
+
+
 
 ### 2️⃣ 训练（开启缓存）
 ```bash

@@ -34,7 +34,7 @@ from transformers import AutoProcessor
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from qwen_vl.model.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from qwen_vl.model.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGenerationForJanusVLN
 
 
 def parse_args():
@@ -260,7 +260,7 @@ def main():
     
     # Load model
     print(f"\n[INFO] Loading model from {args.model_path}...")
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = Qwen2_5_VLForConditionalGenerationForJanusVLN.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
         device_map=args.device,
