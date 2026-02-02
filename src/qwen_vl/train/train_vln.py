@@ -16,7 +16,7 @@ sys.path.append(str(project_root))
 
 import qwen_vl.train.trainer
 try:
-    from trainer import replace_qwen2_vl_attention_class
+    from .trainer import replace_qwen2_vl_attention_class
 except ImportError:
     from qwen_vl.train.trainer import replace_qwen2_vl_attention_class
 
@@ -39,6 +39,7 @@ class WeightedLossTrainer(transformers.Trainer):
         labels = inputs.pop("labels", None)
         loss_weights = inputs.pop("loss_weights", None)
         segment_ids = inputs.pop("segment_ids", None)
+        action_label = inputs.pop("action_label", None)
         outputs = model(**inputs, labels=None)
 
         if labels is None:
@@ -57,13 +58,26 @@ class WeightedLossTrainer(transformers.Trainer):
         )
         active = shift_labels.view(-1) != IGNORE_INDEX
 
+        weight_flat = None
         if loss_weights is not None:
             shift_weights = loss_weights[..., 1:].contiguous().to(loss_flat.device)
             weight_flat = shift_weights.view(-1)
             denom = weight_flat[active].sum().clamp_min(1.0)
-            loss = (loss_flat[active] * weight_flat[active]).sum() / denom
+            loss_text = (loss_flat[active] * weight_flat[active]).sum() / denom
         else:
-            loss = loss_flat[active].mean()
+            loss_text = loss_flat[active].mean()
+
+        # Parallel Action Head Loss
+        loss_action = torch.tensor(0.0, device=loss_text.device)
+        distill_weight = float(
+            getattr(model.config, "distill_loss_weight", getattr(self.args, "distill_loss_weight", 1.0))
+        )
+        action_logits = getattr(outputs, "action_logits", None)
+        if action_label is not None and action_logits is not None:
+            loss_action = F.cross_entropy(action_logits, action_label)
+            loss = loss_text + distill_weight * loss_action
+        else:
+            loss = loss_text
 
         if (
             segment_ids is not None
@@ -78,6 +92,7 @@ class WeightedLossTrainer(transformers.Trainer):
                 seg_mask = active & (shift_seg == seg_idx)
                 if seg_mask.any():
                     if loss_weights is not None:
+                        assert weight_flat is not None
                         seg_denom = weight_flat[seg_mask].sum().clamp_min(1.0)
                         seg_loss = (loss_flat[seg_mask] * weight_flat[seg_mask]).sum() / seg_denom
                     else:
@@ -90,6 +105,8 @@ class WeightedLossTrainer(transformers.Trainer):
             last_step = getattr(self, "_last_segment_log_step", -1)
             if step > 0 and step != last_step and step % self.args.logging_steps == 0:
                 self._last_segment_log_step = step
+                seg_metrics["loss_action_head"] = loss_action.detach().float().item()
+                seg_metrics["loss_text_total"] = loss_text.detach().float().item()
                 self.log(seg_metrics)
 
         return (loss, outputs) if return_outputs else loss
@@ -141,6 +158,11 @@ def set_model(model_args, model):
         p.requires_grad = False
     for _, p in model.merger.named_parameters():
         p.requires_grad = True
+    
+    # Always train action head
+    if hasattr(model, "action_head"):
+        for _, p in model.action_head.named_parameters():
+            p.requires_grad = True
 
 
 def train(attn_implementation="flash_attention_2"):
@@ -179,6 +201,7 @@ def train(attn_implementation="flash_attention_2"):
 
         config = AutoConfig.from_pretrained(model_args.model_name_or_path)
         setattr(config, "lam", model_args.lam)
+        setattr(config, "distill_loss_weight", model_args.distill_loss_weight)
         setattr(config, "reference_frame", model_args.reference_frame)
         model = Qwen2_5_VLForConditionalGenerationForJanusVLN.from_pretrained(
             pretrained_model_name_or_path=model_args.model_name_or_path,
@@ -250,8 +273,3 @@ def train(attn_implementation="flash_attention_2"):
         shutil.copy2(source_path, template_path)
 
     model.config.use_cache = True
-    safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
-
-
-if __name__ == "__main__":
-    train(attn_implementation="flash_attention_2")

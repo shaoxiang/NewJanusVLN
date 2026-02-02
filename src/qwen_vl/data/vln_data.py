@@ -20,6 +20,13 @@ IGNORE_INDEX = -100
 DEFAULT_IMAGE_TOKEN = "<image>"
 STEP_PATTERN = re.compile(r"^step_(\d+)_([A-Za-z_]+)\.(png|jpg|jpeg)$")
 
+ACTION_TO_ID = {
+    "STOP": 0,
+    "MOVE_FORWARD": 1,
+    "TURN_LEFT": 2,
+    "TURN_RIGHT": 3
+}
+
 
 def read_jsonl(path: str, max_samples: int = -1):
     samples = []
@@ -49,12 +56,43 @@ def _normalize_text(value, field_name: str):
 
 
 def _normalize_action(action_value):
-    if isinstance(action_value, str):
-        return action_value.strip()
-    if isinstance(action_value, int):
+    """Normalize action into one of: STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT."""
+    # Unwrap containers
+    if isinstance(action_value, (list, tuple)):
+        if not action_value:
+            raise ValueError("Empty action list")
+        action_value = action_value[0]
+
+    # Unwrap scalar tensors
+    try:
+        if isinstance(action_value, torch.Tensor) and action_value.numel() == 1:
+            action_value = int(action_value.item())
+    except Exception:
+        pass
+
+    # Numeric id
+    if isinstance(action_value, (int, np.integer)):
         action_map = ["STOP", "MOVE_FORWARD", "TURN_LEFT", "TURN_RIGHT"]
-        if 0 <= action_value < len(action_map):
-            return action_map[action_value]
+        if 0 <= int(action_value) < len(action_map):
+            return action_map[int(action_value)]
+        raise ValueError(f"Unknown action id: {action_value}")
+
+    # String name
+    if isinstance(action_value, str):
+        a = action_value.strip().upper()
+        # common normalizations
+        a = a.replace(" ", "_")
+        a = a.replace("-", "_")
+        if a in {"FORWARD", "MOVEFORWARD"}:
+            a = "MOVE_FORWARD"
+        if a in {"LEFT", "TURNLEFT"}:
+            a = "TURN_LEFT"
+        if a in {"RIGHT", "TURNRIGHT"}:
+            a = "TURN_RIGHT"
+        if a in ACTION_TO_ID:
+            return a
+        raise ValueError(f"Unknown action string: {action_value}")
+
     raise ValueError(f"Unknown action format: {action_value}")
 
 
@@ -688,6 +726,7 @@ class LazySupervisedDataset(torch.utils.data.Dataset):
             tag=sample.get("tag", "vln"),
             loss_weights=loss_weights,
             segment_ids=segment_ids,
+            action_label=torch.tensor(ACTION_TO_ID.get(action, 0), dtype=torch.long),
         )
         return data_dict
 
@@ -754,6 +793,9 @@ class DataCollatorForSupervisedDataset:
             loss_weights=loss_weights,
             segment_ids=segment_ids,
         )
+
+        if "action_label" in instances[0]:
+            batch["action_label"] = torch.stack([instance["action_label"] for instance in instances])
 
         images = []
         grid_thw = []

@@ -1715,6 +1715,14 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.rope_deltas = None  # cache rope_deltas here
 
+        # Parallel Action Head for faster inference
+        self.action_head = nn.Sequential(
+            nn.Linear(config.hidden_size, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Linear(512, 4)  # 4 actions: STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT
+        )
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -2204,6 +2212,23 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
+
+        # Extract Action Logits
+        # In training, we take the hidden state before the first assistant token.
+        # In inference, we take the last hidden state.
+        if labels is not None:
+            # labels: [B, L], IGNORE_INDEX is -100
+            # Find the first position where label != -100 for each batch element
+            # We want the hidden state at the position just before the first label
+            action_indices = (labels != -100).argmax(dim=-1) - 1
+            action_indices = action_indices.clamp(min=0)
+            action_hidden_states = hidden_states[torch.arange(hidden_states.size(0)), action_indices]
+        else:
+            # During inference (generation or direct forward), take the last token
+            action_hidden_states = hidden_states[:, -1, :]
+        
+        action_logits = self.action_head(action_hidden_states)
+
         loss = None
         if labels is not None:
             # Upcast to float if we need to compute the loss to avoid potential precision issues
@@ -2229,7 +2254,7 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
 
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (logits, action_logits) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
         return Qwen2_5_VLCausalLMOutputWithPast(
@@ -2239,6 +2264,7 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             rope_deltas=self.rope_deltas,
+            action_logits=action_logits,
         )
 
     def prepare_inputs_for_generation(
