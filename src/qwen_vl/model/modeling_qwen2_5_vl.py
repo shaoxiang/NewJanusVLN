@@ -2253,8 +2253,10 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                 loss += loss_grd
 
 
+        # IMPORTANT: keep tuple output layout compatible with HF `generate()`
+        # (index 1 is expected to be `past_key_values` when `return_dict=False`).
         if not return_dict:
-            output = (logits, action_logits) + outputs[1:]
+            output = (logits,) + outputs[1:] + (action_logits,)
             return (loss,) + output if loss is not None else output
 
         return Qwen2_5_VLCausalLMOutputWithPast(

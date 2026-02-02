@@ -40,7 +40,8 @@ class WeightedLossTrainer(transformers.Trainer):
         loss_weights = inputs.pop("loss_weights", None)
         segment_ids = inputs.pop("segment_ids", None)
         action_label = inputs.pop("action_label", None)
-        outputs = model(**inputs, labels=None)
+        # Pass `labels` into model so action head can locate the prompt/assistant boundary.
+        outputs = model(**inputs, labels=labels)
 
         if labels is None:
             loss = outputs.loss if hasattr(outputs, "loss") else None
@@ -273,3 +274,18 @@ def train(attn_implementation="flash_attention_2"):
         shutil.copy2(source_path, template_path)
 
     model.config.use_cache = True
+
+
+def main():
+    # Entry point for `python -m qwen_vl.train.train_vln` / `torchrun -m ...`
+    # Print something on rank0 ASAP so the run is never "silent".
+    if os.environ.get("RANK", "0") == "0":
+        print(
+            f"[BOOT] Starting JanusVLN training. python={sys.executable} pid={os.getpid()} cwd={os.getcwd()}"
+        )
+        sys.stdout.flush()
+    train()
+
+
+if __name__ == "__main__":
+    main()
