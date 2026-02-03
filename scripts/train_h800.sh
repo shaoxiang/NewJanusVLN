@@ -111,6 +111,16 @@ LEARNING_RATE=${LEARNING_RATE:-2e-5}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 MAX_HISTORY_IMAGES=${MAX_HISTORY_IMAGES:-8}
 
+# Checkpointing (override via env)
+SAVE_STEPS=${SAVE_STEPS:-1000}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-4}
+SAVE_HF_MODEL=${SAVE_HF_MODEL:-true}
+
+# Action-head loss weight schedule (optional)
+DISTILL_LOSS_WEIGHT=${DISTILL_LOSS_WEIGHT:-1.0}
+DISTILL_LOSS_WEIGHT_END=${DISTILL_LOSS_WEIGHT_END:-}
+DISTILL_LOSS_WEIGHT_WARMUP_STEPS=${DISTILL_LOSS_WEIGHT_WARMUP_STEPS:-0}
+
 echo "[INFO] Training config:"
 echo "  Per-device batch: ${PER_DEVICE_BATCH}"
 echo "  Gradient accumulation: ${GRAD_ACCUM_STEPS}"
@@ -118,6 +128,12 @@ echo "  Effective batch size: $((PER_DEVICE_BATCH * NPROC_PER_NODE * GRAD_ACCUM_
 echo "  Learning rate: ${LEARNING_RATE}"
 echo "  Epochs: ${NUM_EPOCHS}"
 echo "  Max history images: ${MAX_HISTORY_IMAGES}"
+echo "  Save steps: $SAVE_STEPS (limit=$SAVE_TOTAL_LIMIT, save_hf_model=$SAVE_HF_MODEL)"
+if [[ -n "${DISTILL_LOSS_WEIGHT_END}" && "${DISTILL_LOSS_WEIGHT_WARMUP_STEPS}" != "0" ]]; then
+  echo "  distill_loss_weight: ${DISTILL_LOSS_WEIGHT} -> ${DISTILL_LOSS_WEIGHT_END} (warmup_steps=${DISTILL_LOSS_WEIGHT_WARMUP_STEPS})"
+else
+  echo "  distill_loss_weight: ${DISTILL_LOSS_WEIGHT}"
+fi
 
 # =========================================================
 # 4. Launcher selection
@@ -162,8 +178,9 @@ fi
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine" \
   --logging_steps 10 \
-  --save_steps 500 \
-  --save_total_limit 2 \
+  --save_steps ${SAVE_STEPS} \
+  --save_total_limit ${SAVE_TOTAL_LIMIT} \
+  --save_hf_model ${SAVE_HF_MODEL} \
   --evaluation_strategy no \
   --eval_steps 300000 \
   --eval_split_ratio 0.0 \
@@ -181,5 +198,8 @@ fi
   --video_min_frames 4 \
   --video_max_frame_pixels $((1664*28*28)) \
   --video_min_frame_pixels $((256*28*28)) \
+  --distill_loss_weight ${DISTILL_LOSS_WEIGHT} \
+  ${DISTILL_LOSS_WEIGHT_END:+--distill_loss_weight_end ${DISTILL_LOSS_WEIGHT_END}} \
+  --distill_loss_weight_warmup_steps ${DISTILL_LOSS_WEIGHT_WARMUP_STEPS} \
   --log_level info \
   2>&1 | tee "${LOG_FILE}"

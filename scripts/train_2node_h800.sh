@@ -131,6 +131,16 @@ LEARNING_RATE=${LEARNING_RATE:-2e-5}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 MAX_HISTORY_IMAGES=${MAX_HISTORY_IMAGES:-8}
 
+# Checkpointing (override via env)
+SAVE_STEPS=${SAVE_STEPS:-500}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-2}
+SAVE_HF_MODEL=${SAVE_HF_MODEL:-true}
+
+# Action-head loss weight schedule (optional)
+DISTILL_LOSS_WEIGHT=${DISTILL_LOSS_WEIGHT:-1.0}
+DISTILL_LOSS_WEIGHT_END=${DISTILL_LOSS_WEIGHT_END:-}
+DISTILL_LOSS_WEIGHT_WARMUP_STEPS=${DISTILL_LOSS_WEIGHT_WARMUP_STEPS:-0}
+
 echo "[INFO] Training config:"
 echo "  Nodes: $NNODES x $NPROC_PER_NODE GPUs = $((NNODES * NPROC_PER_NODE)) total GPUs"
 echo "  Per-device batch: $PER_DEVICE_BATCH"
@@ -139,6 +149,12 @@ echo "  Effective batch size: $((PER_DEVICE_BATCH * NPROC_PER_NODE * NNODES * GR
 echo "  Learning rate: $LEARNING_RATE"
 echo "  Epochs: $NUM_EPOCHS"
 echo "  Max history images: $MAX_HISTORY_IMAGES"
+echo "  Save steps: $SAVE_STEPS (limit=$SAVE_TOTAL_LIMIT, save_hf_model=$SAVE_HF_MODEL)"
+if [[ -n "${DISTILL_LOSS_WEIGHT_END}" && "${DISTILL_LOSS_WEIGHT_WARMUP_STEPS}" != "0" ]]; then
+  echo "  distill_loss_weight: ${DISTILL_LOSS_WEIGHT} -> ${DISTILL_LOSS_WEIGHT_END} (warmup_steps=${DISTILL_LOSS_WEIGHT_WARMUP_STEPS})"
+else
+  echo "  distill_loss_weight: ${DISTILL_LOSS_WEIGHT}"
+fi
 
 # =========================================================
 # 4. Launcher Selection
@@ -188,8 +204,9 @@ echo "=" | head -c 80 && echo
   --warmup_ratio 0.03 \
   --lr_scheduler_type "cosine" \
   --logging_steps 10 \
-  --save_steps 500 \
-  --save_total_limit 2 \
+  --save_steps ${SAVE_STEPS} \
+  --save_total_limit ${SAVE_TOTAL_LIMIT} \
+  --save_hf_model ${SAVE_HF_MODEL} \
   --evaluation_strategy no \
   --eval_steps 300000 \
   --eval_split_ratio 0.0 \
@@ -210,7 +227,9 @@ echo "=" | head -c 80 && echo
   --desc2d_weight 1.0 \
   --desc3d_weight 1.0 \
   --action_weight 2.0 \
-  --distill_loss_weight 1.0 \
+  --distill_loss_weight ${DISTILL_LOSS_WEIGHT} \
+  ${DISTILL_LOSS_WEIGHT_END:+--distill_loss_weight_end ${DISTILL_LOSS_WEIGHT_END}} \
+  --distill_loss_weight_warmup_steps ${DISTILL_LOSS_WEIGHT_WARMUP_STEPS} \
   2>&1 | tee "${LOG_FILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}

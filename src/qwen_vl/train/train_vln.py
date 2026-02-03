@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import transformers
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, set_seed
+from typing import Optional
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
@@ -35,6 +36,33 @@ def rank0_print(*args):
 
 
 class WeightedLossTrainer(transformers.Trainer):
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+        """Override save behavior for DeepSpeed.
+
+        - If `--save_hf_model False` and DeepSpeed is enabled, we only save the DeepSpeed checkpoint (for resume)
+          to avoid the large memory spike of gathering weights into a consolidated HF state dict.
+        - Otherwise, fall back to default HF Trainer behavior.
+        """
+
+        output_dir = output_dir or self.args.output_dir
+
+        if getattr(self, "deepspeed", None) and not getattr(self.args, "save_hf_model", True):
+            # Save DeepSpeed checkpoint under checkpoint-* (will create global_step*/ inside)
+            tag = f"global_step{int(self.state.global_step)}"
+            self.deepspeed.save_checkpoint(output_dir, tag=tag)
+
+            # Still save minimal HF artifacts for bookkeeping
+            if self.args.should_save:
+                if getattr(self, "tokenizer", None) is not None:
+                    self.tokenizer.save_pretrained(output_dir)
+                try:
+                    self.model.config.save_pretrained(output_dir)
+                except Exception:
+                    pass
+            return
+
+        return super().save_model(output_dir=output_dir, _internal_call=_internal_call)
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels", None)
         loss_weights = inputs.pop("loss_weights", None)
@@ -70,9 +98,16 @@ class WeightedLossTrainer(transformers.Trainer):
 
         # Parallel Action Head Loss
         loss_action = torch.tensor(0.0, device=loss_text.device)
-        distill_weight = float(
-            getattr(model.config, "distill_loss_weight", getattr(self.args, "distill_loss_weight", 1.0))
-        )
+        # Action head loss weight (supports simple linear ramp)
+        distill_start = float(getattr(model.config, "distill_loss_weight", 1.0))
+        distill_end = getattr(model.config, "distill_loss_weight_end", None)
+        warmup_steps = int(getattr(model.config, "distill_loss_weight_warmup_steps", 0) or 0)
+
+        distill_weight = distill_start
+        if distill_end is not None and warmup_steps > 0 and hasattr(self, "state"):
+            step = int(getattr(self.state, "global_step", 0) or 0)
+            t = min(max(step, 0), warmup_steps) / float(warmup_steps)
+            distill_weight = distill_start + (float(distill_end) - distill_start) * t
         action_logits = getattr(outputs, "action_logits", None)
         if action_label is not None and action_logits is not None:
             loss_action = F.cross_entropy(action_logits, action_label)
@@ -203,6 +238,8 @@ def train(attn_implementation="flash_attention_2"):
         config = AutoConfig.from_pretrained(model_args.model_name_or_path)
         setattr(config, "lam", model_args.lam)
         setattr(config, "distill_loss_weight", model_args.distill_loss_weight)
+        setattr(config, "distill_loss_weight_end", model_args.distill_loss_weight_end)
+        setattr(config, "distill_loss_weight_warmup_steps", model_args.distill_loss_weight_warmup_steps)
         setattr(config, "reference_frame", model_args.reference_frame)
         model = Qwen2_5_VLForConditionalGenerationForJanusVLN.from_pretrained(
             pretrained_model_name_or_path=model_args.model_name_or_path,

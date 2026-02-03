@@ -11,7 +11,22 @@ class ModelArguments:
     tune_mm_vision: bool = field(default=False)
     vggt_model_path: str = field(default="facebook/VGGT-1B/")
     lam: float = field(default=0.2)
+
+    # Main objective weight for action head (classification)
     distill_loss_weight: float = field(default=1.0)
+    distill_loss_weight_end: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Optional: ramp distill_loss_weight linearly towards this value over distill_loss_weight_warmup_steps"
+        },
+    )
+    distill_loss_weight_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Warmup steps for distill_loss_weight ramp. 0 disables scheduling."
+        },
+    )
+
     reference_frame: str = field(default="last")
 
 
@@ -88,3 +103,10 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_projector_lr: Optional[float] = None
     vision_tower_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
+
+    save_hf_model: bool = field(
+        default=True,
+        metadata={
+            "help": "When using DeepSpeed: also save consolidated HuggingFace model weights in each checkpoint. If False, only saves DeepSpeed checkpoint (resume-only) to reduce save time/memory."
+        },
+    )
