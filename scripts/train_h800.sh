@@ -182,7 +182,7 @@ fi
   --save_total_limit ${SAVE_TOTAL_LIMIT} \
   --save_hf_model ${SAVE_HF_MODEL} \
   --evaluation_strategy no \
-  --eval_steps 300000 \
+  --eval_steps 1000 \
   --eval_split_ratio 0.0 \
   --eval_num_samples 2 \
   --dataloader_num_workers 16 \

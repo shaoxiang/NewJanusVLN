@@ -84,3 +84,21 @@ torchrun \
     --video_min_frame_pixels $((256*28*28)) \
     --log_level info \
     2>&1 | tee "${OUTPUT_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
+
+
+export NNODES=2
+export NODE_RANK=1
+export MASTER_ADDR=173.0.87.2
+export MASTER_PORT=29500
+
+export NCCL_IB_DISABLE=0
+export NCCL_SOCKET_IFNAME=eth0
+export NCCL_IB_HCA=mlx5
+
+export MODEL_PATH="/public/home/vlabadmin/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-7B-Instruct"
+export VGGT_MODEL_PATH="/public/home/vlabadmin/.cache/modelscope/hub/models/facebook/VGGT-1B"
+
+export DATA_ROOT="/public/home/vlabadmin/dataset/VLN/JanusVLN_Trajectory_Data/trajectory_data/R2R-CE-640x480/train"
+export OUTPUT_DIR="/public/home/vlabadmin/dataset/NewJanusVLN/outputs/vln_h800_8gpu"
+
+bash scripts/train_2node_h800.sh

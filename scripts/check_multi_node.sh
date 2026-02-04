@@ -93,12 +93,18 @@ if command -v ibv_devices &> /dev/null; then
             fi
         fi
         
-        # Check IB interfaces
-        IB_IFACES=$(ifconfig 2>/dev/null | grep -o "^ib[0-9]*" || ip addr 2>/dev/null | grep -o "ib[0-9]*" | head -1 || echo "")
+        # Check IPoIB interfaces (optional)
+        IB_IFACES=$(ifconfig 2>/dev/null | grep -o "^ib[0-9]*" || ip addr 2>/dev/null | grep -o "\bib[0-9]*\b" | sort -u | tr '\n' ' ' | sed 's/ $//' || echo "")
         if [[ -n "$IB_IFACES" ]]; then
-            check_pass "InfiniBand network interfaces: $IB_IFACES"
+            check_pass "IPoIB interfaces found: $IB_IFACES"
         else
-            check_warn "No IB network interfaces found (ib0, ib1, etc.)"
+            check_warn "No IPoIB interface (ib0/ib1) found. This is OK if you use IB verbs/RDMA without IPoIB."
+            if command -v ip &> /dev/null && [[ -n "${MASTER_ADDR:-}" ]]; then
+                ROUTE_DEV=$(ip -o route get "${MASTER_ADDR}" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)
+                if [[ -n "$ROUTE_DEV" ]]; then
+                    echo "    Suggest: export NCCL_SOCKET_IFNAME=$ROUTE_DEV"
+                fi
+            fi
         fi
     else
         check_warn "No InfiniBand devices found (will use Ethernet)"
@@ -235,13 +241,13 @@ echo "============================================"
 echo ""
 
 if [[ -n "$IB_DEVICES" ]]; then
-    echo "✓ Your system has InfiniBand. Recommended configuration:"
+    echo "✓ Your system has RDMA-capable devices (InfiniBand/RoCE). Recommended configuration:"
     echo "  export NCCL_IB_DISABLE=0"
-    echo "  export NCCL_IB_HCA=mlx5"
-    echo "  export NCCL_SOCKET_IFNAME=ib0"
+    echo "  export NCCL_IB_HCA=mlx5  # or a comma list like mlx5_0,mlx5_1,... (exclude RoCE ports if needed)"
+    echo "  # NCCL_SOCKET_IFNAME should be an interface that can reach MASTER_ADDR (may be eth/bond even if using IB verbs)"
     echo ""
 else
-    echo "⚠ No InfiniBand detected. For Ethernet-only:"
+    echo "⚠ No RDMA device detected. For Ethernet-only:"
     echo "  export NCCL_IB_DISABLE=1"
     echo "  export NCCL_SOCKET_IFNAME=eth0  # or your ethernet interface"
     echo ""

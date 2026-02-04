@@ -45,12 +45,37 @@ if [[ $NNODES -gt 1 ]]; then
   echo "[INFO] Current node rank: $NODE_RANK"
   echo "[INFO] Master address: $MASTER_ADDR:$MASTER_PORT"
   
-  # NCCL optimization for InfiniBand
-  export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}        # Enable IB (set to 1 for Ethernet-only)
-  export NCCL_IB_HCA=${NCCL_IB_HCA:-mlx5}             # IB device (adjust per hardware)
-  export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib0} # Network interface
+  # NCCL optimization for InfiniBand / RoCE / Ethernet
+  # NOTE: even if you don't have an IPoIB interface like ib0, NCCL can still use IB verbs.
+  export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}        # 0=enable IB/RDMA, 1=Ethernet-only
+
+  # Pick a sane default interface for TCP bootstrap (and socket-based fallback).
+  # Priority:
+  #   1) user-provided NCCL_SOCKET_IFNAME
+  #   2) interface used to reach MASTER_ADDR (via `ip route get`)
+  #   3) ib0 if exists
+  #   4) eth0
+  if [[ -z "${NCCL_SOCKET_IFNAME:-}" ]]; then
+    if command -v ip >/dev/null 2>&1 && [[ "${MASTER_ADDR}" != "localhost" ]]; then
+      _ROUTE_DEV=$(ip -o route get "${MASTER_ADDR}" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+      if [[ -n "${_ROUTE_DEV}" ]]; then
+        export NCCL_SOCKET_IFNAME="${_ROUTE_DEV}"
+      fi
+    fi
+    if [[ -z "${NCCL_SOCKET_IFNAME:-}" ]]; then
+      if command -v ip >/dev/null 2>&1 && ip link show ib0 >/dev/null 2>&1; then
+        export NCCL_SOCKET_IFNAME=ib0
+      else
+        export NCCL_SOCKET_IFNAME=eth0
+      fi
+    fi
+  fi
+
+  # IB HCA selection: override this if you have mixed IB/RoCE NICs (e.g. exclude RoCE ports).
+  export NCCL_IB_HCA=${NCCL_IB_HCA:-mlx5}
+
   export NCCL_NET_GDR_LEVEL=${NCCL_NET_GDR_LEVEL:-5}  # GPU Direct RDMA
-  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}    # RoCE mode
+  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-0}    # For RoCE you may need 3 (override via env)
   export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-22}       # IB timeout (default: 18)
   export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-7}    # IB retry count
   
