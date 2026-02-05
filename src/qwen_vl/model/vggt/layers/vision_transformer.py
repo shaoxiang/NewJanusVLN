@@ -12,6 +12,21 @@ from . import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBloc
 logger = logging.getLogger("dinov2")
 
 
+def _any_requires_grad(x) -> bool:
+    """Return True if any tensor inside x requires grad.
+
+    This is mainly used to avoid torch.utils.checkpoint warnings when running under
+    torch.no_grad() or when a submodule is intentionally frozen.
+    """
+    if torch.is_tensor(x):
+        return bool(x.requires_grad)
+    if isinstance(x, (list, tuple)):
+        return any(_any_requires_grad(v) for v in x)
+    if isinstance(x, dict):
+        return any(_any_requires_grad(v) for v in x.values())
+    return False
+
+
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
     if not depth_first and include_root:
         fn(module=module, name=name)
@@ -230,7 +245,7 @@ class DinoVisionTransformer(nn.Module):
         x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
 
         for blk in self.blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and torch.is_grad_enabled() and _any_requires_grad(x):
                 x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
             else:
                 x = blk(x)
@@ -257,7 +272,7 @@ class DinoVisionTransformer(nn.Module):
         x = self.prepare_tokens_with_masks(x, masks)
 
         for blk in self.blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and torch.is_grad_enabled() and _any_requires_grad(x):
                 x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
             else:
                 x = blk(x)

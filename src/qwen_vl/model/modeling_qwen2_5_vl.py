@@ -2084,7 +2084,13 @@ class Qwen2_5_VLForConditionalGenerationForJanusVLN(Qwen2_5_VLPreTrainedModel, G
                             sam3_obj_tokens = self._run_sam3(raw_images[i])
 
                         with torch.no_grad():
-                            with torch.cuda.amp.autocast(dtype=dtype):
+                            # torch.cuda.amp.autocast is deprecated; prefer torch.amp.autocast when available.
+                            try:
+                                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
+                            except AttributeError:
+                                autocast_ctx = torch.cuda.amp.autocast(dtype=dtype)
+
+                            with autocast_ctx:
                                 if not self.config.reference_frame=="first":
                                     images_vggt[i] = torch.flip(images_vggt[i], dims=(0,))
                                 

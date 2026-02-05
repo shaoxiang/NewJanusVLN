@@ -22,6 +22,12 @@ export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
 export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
 export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
 
+# If you ever run multi-node with this script via torchrun env overrides,
+# ensure Gloo uses the same TCP interface as NCCL.
+if [[ -n "${NCCL_SOCKET_IFNAME:-}" && -z "${GLOO_SOCKET_IFNAME:-}" ]]; then
+  export GLOO_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME%%,*}"
+fi
+
 # On any error, dump last lines of the log so it is never "silent"
 trap 'rc=$?; echo "[FATAL] train_h800.sh failed with exit code ${rc}" >&2; if [[ -n "${LOG_FILE:-}" && -f "${LOG_FILE}" ]]; then echo "[FATAL] Last 200 lines of ${LOG_FILE}:" >&2; tail -n 200 "${LOG_FILE}" >&2 || true; fi; exit ${rc}' ERR
 
@@ -114,7 +120,7 @@ MAX_HISTORY_IMAGES=${MAX_HISTORY_IMAGES:-8}
 # Checkpointing (override via env)
 SAVE_STEPS=${SAVE_STEPS:-1000}
 SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-4}
-SAVE_HF_MODEL=${SAVE_HF_MODEL:-true}
+SAVE_HF_MODEL=${SAVE_HF_MODEL:-True}
 
 # Action-head loss weight schedule (optional)
 DISTILL_LOSS_WEIGHT=${DISTILL_LOSS_WEIGHT:-1.0}

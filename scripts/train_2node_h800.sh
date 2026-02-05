@@ -71,6 +71,13 @@ if [[ $NNODES -gt 1 ]]; then
     fi
   fi
 
+  # Gloo (used by DeepSpeed/Accelerate for some process group ops) needs an explicit interface too.
+  # If NCCL_SOCKET_IFNAME is a list, take the first one.
+  if [[ -z "${GLOO_SOCKET_IFNAME:-}" ]]; then
+    export GLOO_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME%%,*}"
+  fi
+  echo "[INFO] NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
+  echo "[INFO] GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
   # IB HCA selection: override this if you have mixed IB/RoCE NICs (e.g. exclude RoCE ports).
   export NCCL_IB_HCA=${NCCL_IB_HCA:-mlx5}
 
@@ -84,7 +91,8 @@ if [[ $NNODES -gt 1 ]]; then
   export NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-SYS}        # P2P level
   export NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-0}      # Enable shared memory
   export NCCL_BUFFSIZE=${NCCL_BUFFSIZE:-8388608}      # Buffer size (8MB)
-  export NCCL_NTHREADS=${NCCL_NTHREADS:-640}          # NCCL threads for H800
+  # NCCL_NTHREADS is capped by NCCL (commonly max 512). Use 512 by default to avoid warnings.
+  export NCCL_NTHREADS=${NCCL_NTHREADS:-512}          # NCCL threads (max 512)
   
   # NCCL debugging (comment out for production)
   export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
@@ -105,6 +113,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$WORK_DIR"
 
+# Ensure we always import the repo-local code (avoid accidentally using an older pip-installed package)
+export PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}"
+
+# Avoid occasional NFS/parallel FS I/O issues when Triton/torch extensions write caches
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/tmp/triton_${USER}}
+export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/tmp/torch_extensions_${USER}}
+
 # =========================================================
 # 2. Path Configuration
 # =========================================================
@@ -114,7 +129,7 @@ VGGT_MODEL_PATH="${VGGT_MODEL_PATH:-/path/to/VGGT-1B}"
 DATA_ROOT="${DATA_ROOT:-/path/to/train_data}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/vln_2node_h800}"
 CACHE_DIR="${CACHE_DIR:-./cache}"
-DS_CONFIG="${DS_CONFIG:-./scripts/zero3.json}"
+DS_CONFIG="${DS_CONFIG:-./scripts/zero2.json}"
 
 # Validate paths
 if [[ ! -d "${MODEL_PATH}" ]]; then
@@ -152,14 +167,14 @@ echo "[INFO] Logging to: ${LOG_FILE}"
 # Example: 1 * 8 * 2 * 8 = 128
 PER_DEVICE_BATCH=${PER_DEVICE_BATCH:-1}
 GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS:-8}
-LEARNING_RATE=${LEARNING_RATE:-2e-5}
+LEARNING_RATE=${LEARNING_RATE:-3e-5}
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 MAX_HISTORY_IMAGES=${MAX_HISTORY_IMAGES:-8}
 
 # Checkpointing (override via env)
-SAVE_STEPS=${SAVE_STEPS:-500}
-SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-2}
-SAVE_HF_MODEL=${SAVE_HF_MODEL:-true}
+SAVE_STEPS=${SAVE_STEPS:-2000}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-4}
+SAVE_HF_MODEL=${SAVE_HF_MODEL:-True}
 
 # Action-head loss weight schedule (optional)
 DISTILL_LOSS_WEIGHT=${DISTILL_LOSS_WEIGHT:-1.0}
@@ -223,7 +238,7 @@ echo "=" | head -c 80 && echo
   --learning_rate ${LEARNING_RATE} \
   --mm_projector_lr 1e-5 \
   --vision_tower_lr 1e-6 \
-  --model_max_length 163840 \
+  --model_max_length 8192 \
   --num_train_epochs ${NUM_EPOCHS} \
   --max_history_images ${MAX_HISTORY_IMAGES} \
   --warmup_ratio 0.03 \
@@ -236,8 +251,9 @@ echo "=" | head -c 80 && echo
   --eval_steps 300000 \
   --eval_split_ratio 0.0 \
   --eval_num_samples 2 \
-  --dataloader_num_workers 16 \
+  --dataloader_num_workers 32 \
   --dataloader_pin_memory True \
+  --dataloader_persistent_workers True \
   --dataloader_prefetch_factor 4 \
   --gradient_checkpointing True \
   --ddp_timeout 7200 \
@@ -251,7 +267,7 @@ echo "=" | head -c 80 && echo
   --subinstruction_weight 1.0 \
   --desc2d_weight 1.0 \
   --desc3d_weight 1.0 \
-  --action_weight 2.0 \
+  --action_weight 3.0 \
   --distill_loss_weight ${DISTILL_LOSS_WEIGHT} \
   ${DISTILL_LOSS_WEIGHT_END:+--distill_loss_weight_end ${DISTILL_LOSS_WEIGHT_END}} \
   --distill_loss_weight_warmup_steps ${DISTILL_LOSS_WEIGHT_WARMUP_STEPS} \
